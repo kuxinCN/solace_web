@@ -8,7 +8,7 @@
  *   * diaryContext（读日记时用）：插在 messages 最前面，只发给 AI、不落库、不返回
  *   * 配置（接口地址 / Key / 模型）从后台数据库读，数据库没配好时回退 .env.local
  */
-import { requestChat } from "@/lib/ai";
+import { requestChat, chatCompletionsUrl } from "@/lib/ai";
 import { rateLimit } from "@/lib/rate-limit";
 import { getGroup } from "@/lib/settings";
 import { getCurrentUser } from "@/lib/user-auth";
@@ -75,20 +75,6 @@ export async function POST(request) {
   }
 
   const wantStream = payload?.stream === true;
-  const messages = normalizeMessages(payload?.messages);
-
-  if (typeof payload?.diaryContext === "string" && payload.diaryContext.trim()) {
-    messages.unshift({
-      role: "system",
-      content:
-        "以下是用户刚刚写的日记正文，仅供你理解情绪和上下文，不要在回复中复述原文：\n" +
-        payload.diaryContext.slice(0, MAX_CONTENT_CHARS),
-    });
-  }
-
-  if (!messages.length) {
-    return Response.json({ reply: FALLBACK_REPLY, error: "没有可发送的内容" });
-  }
 
   let config = null;
   try {
@@ -103,6 +89,33 @@ export async function POST(request) {
       reply: FALLBACK_REPLY,
       error: "对话 AI 尚未配置：请到后台「对话 AI」页面填写接口地址、API Key 和模型",
     });
+  }
+
+  // 组装最终发给 AI 的消息：
+  //   * 系统提示词优先用后台配置的（后台改完保存就生效，不用重启）；后台没配才用前端传来的
+  //   * 读日记时，把日记正文按后台配置的模板拼进去（模板里的 {diary} 会被替换成正文）
+  const incoming = normalizeMessages(payload?.messages);
+  const frontEndSystem = incoming.filter((item) => item.role === "system");
+  const dialogue = incoming.filter((item) => item.role !== "system");
+
+  const configuredSystem = String(config.systemPrompt || "").trim();
+  const messages = configuredSystem
+    ? [{ role: "system", content: configuredSystem }, ...dialogue]
+    : [...frontEndSystem, ...dialogue];
+
+  if (typeof payload?.diaryContext === "string" && payload.diaryContext.trim()) {
+    const diary = payload.diaryContext.slice(0, MAX_CONTENT_CHARS);
+    const template =
+      String(config.diaryPrompt || "").trim() ||
+      "以下是用户刚刚写的日记正文，仅供你理解情绪和上下文，不要在回复中复述原文：\n{diary}";
+    const content = template.includes("{diary}")
+      ? template.replace(/\{diary\}/g, diary)
+      : `${template}\n${diary}`;
+    messages.unshift({ role: "system", content });
+  }
+
+  if (dialogue.length === 0) {
+    return Response.json({ reply: FALLBACK_REPLY, error: "没有可发送的内容" });
   }
 
   // ---------------- 非流式：直接返回完整回复 ----------------
@@ -138,7 +151,7 @@ export async function POST(request) {
       };
 
       try {
-        const upstream = await fetch(`${baseUrl}/chat/completions`, {
+        const upstream = await fetch(chatCompletionsUrl(baseUrl), {
           method: "POST",
           signal:
             typeof AbortSignal?.timeout === "function"

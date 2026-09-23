@@ -4,6 +4,7 @@
  * 改完保持登录状态（和前端的预期一致）。
  */
 import { describeDbError, execute } from "@/lib/db";
+import { rateLimit } from "@/lib/rate-limit";
 import { encryptText } from "@/lib/secret-box";
 import { getCurrentUser } from "@/lib/user-auth";
 import { json, jsonError, readJsonBody } from "@/lib/util";
@@ -17,6 +18,15 @@ const MAX_PASSWORD_LENGTH = 64;
 export async function PUT(request) {
   const user = await getCurrentUser(request);
   if (!user) return jsonError("请先登录", 401);
+
+  // 防止被拿来做撞库/滥用：按用户限流
+  const quota = rateLimit(`change-password:${user.id}`, {
+    limit: 10,
+    windowMs: 10 * 60 * 1000,
+  });
+  if (!quota.ok) {
+    return jsonError(`操作太频繁，请 ${quota.retryAfterSeconds} 秒后再试`, 429);
+  }
 
   const body = await readJsonBody(request);
   const password = typeof body.password === "string" ? body.password : "";

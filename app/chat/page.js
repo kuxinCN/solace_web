@@ -6,6 +6,7 @@ import ConfirmModal from "@/components/ConfirmModal";
 import ProfileView from "@/components/ProfileView";
 import BioModal from "@/components/BioModal";
 import AboutModal from "@/components/AboutModal";
+import ImageCropper from "@/components/ImageCropper";
 
 // 统一的数据请求封装：所有后端 REST 调用都走这里
 async function apiRequest(path, options = {}) {
@@ -45,10 +46,102 @@ const SYSTEM_PROMPT = `你是一位温柔的情绪陪伴者，不是心理咨询
 3. 不讲大道理，不给人生建议，不评判对错，不催他振作、不要急着让他"好起来"。用户需要的不是解决方案，而是有人陪着。
 4. 语气像认识很久的老朋友：温暖、自然、口语化、有温度。可以用"嗯""我在""慢慢说"这样简短的回应。
 5. 多用一句问一句的节奏，把话头轻轻递回给用户，让他愿意继续说下去。
-6. 回复要短，通常两三句话就够，不要长篇大论。`;
+6. 回复要短，通常两三句话就够，不要长篇大论。
+7. 每句话控制在 20 字以内，如果需要说多句话，请用换行符 \n 分隔，不要写成一大段。`;
 
 // 读日记时的额外指令（只发给 AI，不存进数据库）
-const DIARY_INSTRUCTION = `（你刚刚阅读了用户的日记，请以陪伴者身份自然回应，不要机械开场，不要复述内容，回复不超过 40 字。）`;
+const DIARY_INSTRUCTION = `你刚刚读了用户的日记，请以陪伴者身份自然地回应。可以自然引用日记里的具体细节或情绪（比如"你提到今天很累""你写的那段话我记下了"），然后给予一定安慰，并向用户表示如果可以继续倾诉。不要逐句复述原文。回复不超过 60 字，要具体、有温度，不要用通用套话。`;
+
+// 把 AI 回复按 \n 切成多个短消息段，过滤空段；用于"真人连发短消息"效果
+function splitAiSegments(content) {
+  if (!content) return [];
+  return content
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// 流式 TTS 分句参数
+const SENT_MIN = 4; // 短于 4 个字的句子先与下一句合并，避免碎片语音
+const SENT_MAX = 60; // 无标点超过 60 字强制切分，避免长句等太久
+// 首句快速通道（降低"发送→出声"延迟）：第一个句子不必等句号。
+const EAGER_SOFT = 9; // 首句累积到 9 字：窗口内有逗号就在逗号后切，TTS 立刻开始
+const EAGER_HARD = 15; // 首句到 15 字仍无逗号：硬切一次（罕见兜底，SYSTEM_PROMPT 要求多逗号）
+// 从累积文本中切出"已可合成"的句子。分隔符：。！？\n
+// flush=true 时（文本流结束）残余也作为一句吐出。
+// eager=true 时（当前还没有任何句子开始播放）启用首句快速通道。
+// 纯函数，返回 { sentences, rest }。
+function drainSentences(pending, flush, eager = false) {
+  const sentences = [];
+  // 每个"片段"要么带句尾标点，要么是末尾还没标点的残段
+  const pieces = pending.match(/[^。！？\n]+[。！？\n]?/g) || [];
+  let carry = ""; // 过短、等待与下一句合并的完整短句
+  let tail = ""; // 末尾无标点残段
+  for (const piece of pieces) {
+    if (!/[。！？\n]$/.test(piece)) {
+      tail = piece;
+      continue;
+    }
+    let merged = carry + piece;
+    carry = "";
+    if (merged.length < SENT_MIN) {
+      carry = merged; // 太短，等下一句
+      continue;
+    }
+    if (merged.length > SENT_MAX) {
+      sentences.push(merged.slice(0, SENT_MAX));
+      merged = merged.slice(SENT_MAX);
+    }
+    sentences.push(merged);
+  }
+  let remaining = carry + tail;
+  // 首句快速通道：一句完整标点都还没切出来时，9 字遇逗号即切 / 15 字硬切。
+  // 在逗号（含逗号）处切，TTS 朗读带自然停顿；硬切只在长句无逗号时兜底。
+  if (eager && sentences.length === 0 && !flush && remaining) {
+    if (remaining.length >= EAGER_SOFT) {
+      const scanWin = remaining.slice(0, EAGER_HARD);
+      const commaIdx = scanWin.lastIndexOf("，");
+      if (commaIdx >= EAGER_SOFT - 3) {
+        // 逗号前至少 6 个字，切出来是个有意义的半句（如"你提到今天很累，"）
+        sentences.push(remaining.slice(0, commaIdx + 1));
+        remaining = remaining.slice(commaIdx + 1);
+      } else if (remaining.length >= EAGER_HARD) {
+        sentences.push(remaining.slice(0, EAGER_HARD));
+        remaining = remaining.slice(EAGER_HARD);
+      }
+    }
+  }
+  // 无标点超长：优先在 60 字窗口内最后一个逗号处切，否则硬切
+  while (remaining.length > SENT_MAX) {
+    const win = remaining.slice(0, SENT_MAX);
+    let cut = win.lastIndexOf("，");
+    if (cut < SENT_MIN) cut = SENT_MAX;
+    else cut += 1;
+    sentences.push(remaining.slice(0, cut));
+    remaining = remaining.slice(cut);
+  }
+  if (flush && remaining.trim()) sentences.push(remaining);
+  return { sentences, rest: flush ? "" : remaining };
+}
+
+// 对话活动时间（last_message_at）的友好标签：
+// 今天 / 昨天 / X天前 / 具体日期（今年 M/D，跨年 YYYY/M/D）。
+// 侧边栏行内时间与分组标题共用，保证两处口径一致。
+function friendlyTimeLabel(dateStr) {
+  if (!dateStr) return "";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.round((today - that) / 86400000);
+  if (diffDays <= 0) return "今天";
+  if (diffDays === 1) return "昨天";
+  if (diffDays <= 6) return `${diffDays}天前`;
+  return d.getFullYear() === now.getFullYear()
+    ? `${d.getMonth() + 1}/${d.getDate()}`
+    : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
+}
 
 // 截取命中关键词附近的一小段文字，用于搜索结果预览
 function snippetAround(content, keyword) {
@@ -77,43 +170,6 @@ function dataUrlToBlob(dataUrl) {
   const arr = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
-}
-
-// 把图片文件压缩成 base64 data URL（限制最长边、逐步降质量），
-// 供后端 /api/user/upload 在体积上限内接收
-function compressImageToDataUrl(file, maxSize = 1280) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onerror = reject;
-    reader.onload = () => {
-      const img = new Image();
-      img.onerror = reject;
-      img.onload = () => {
-        let width = img.naturalWidth || img.width;
-        let height = img.naturalHeight || img.height;
-        const scale = Math.min(1, maxSize / Math.max(width, height));
-        width = Math.max(1, Math.round(width * scale));
-        height = Math.max(1, Math.round(height * scale));
-        const canvas = document.createElement("canvas");
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext("2d");
-        // 白底，避免 PNG 透明区域导出为黑色
-        ctx.fillStyle = "#ffffff";
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(img, 0, 0, width, height);
-        let quality = 0.85;
-        let out = canvas.toDataURL("image/jpeg", quality);
-        while (out.length > 850 * 1024 && quality > 0.4) {
-          quality -= 0.1;
-          out = canvas.toDataURL("image/jpeg", quality);
-        }
-        resolve(out);
-      };
-      img.src = reader.result;
-    };
-    reader.readAsDataURL(file);
-  });
 }
 
 // AI 头像：优先用户自定义（profiles.ai_avatar_url），否则默认渐变圆形
@@ -174,11 +230,7 @@ function ConvRow({
   onDelete,
   closeMenu,
 }) {
-  const timeLabel = (() => {
-    if (!c.created_at) return "";
-    const d = new Date(c.created_at);
-    return `${d.getMonth() + 1}/${d.getDate()}`;
-  })();
+  const timeLabel = friendlyTimeLabel(c.last_message_at || c.created_at);
 
   return (
     <div
@@ -328,12 +380,16 @@ function ConversationGroups({
     .sort((a, b) => new Date(b.pinned_at || 0) - new Date(a.pinned_at || 0));
   const unpinned = conversations
     .filter((c) => !c.pinned)
-    .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0));
+    .sort(
+      (a, b) =>
+        new Date(b.last_message_at || b.created_at || 0) -
+        new Date(a.last_message_at || a.created_at || 0)
+    );
 
-  // 按时间轴标签分组
+  // 按活动时间标签分组
   const groups = {};
   for (const c of unpinned) {
-    const label = timeGroupLabel(c.created_at);
+    const label = timeGroupLabel(c.last_message_at || c.created_at);
     if (!groups[label]) groups[label] = [];
     groups[label].push(c);
   }
@@ -389,6 +445,8 @@ function ConversationGroups({
 
 export default function Chat() {
   const [user, setUser] = useState(null);
+  // 认证检查中：session 接口返回前不渲染聊天界面、不跳转，避免登录后闪烁回登录页
+  const [authLoading, setAuthLoading] = useState(true);
   const [conversations, setConversations] = useState([]);
   const [currentId, setCurrentId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -396,6 +454,40 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [pendingReply, setPendingReply] = useState(false);
   const [regenId, setRegenId] = useState(null); // 正在重新生成的 AI 气泡 id
+  // 语音播放：当前正在加载 / 正在播放的 AI 消息 id（同时只允许一条）
+  const [ttsLoadingId, setTtsLoadingId] = useState(null);
+  const [ttsPlayingId, setTtsPlayingId] = useState(null);
+  const ttsAudioRef = useRef(null); // 全局唯一 Audio 对象
+  const ttsObjectUrlRef = useRef(null); // 当前 blob ObjectURL（用于撤销）
+  const ttsAbortRef = useRef(null); // 进行中的请求（用于取消）
+  const ttsIdRef = useRef(null); // 当前占用音频的消息 id（事件回调里比对）
+  // 流式自动播放会话（"边打字边说话"）：以稳定 ck 标识，气泡落库转正前后都能匹配。
+  // ttsPlayingCk 驱动气泡喇叭显示"播放中"；autoSessionRef 持有队列/请求等全部运行时状态。
+  const [ttsPlayingCk, setTtsPlayingCk] = useState(null);
+  const autoSessionRef = useRef(null);
+  // autoPlay 的 ref 镜像：流式回调在 async 闭包里执行，直接读 state 会拿到陈旧值。
+  const autoPlayRef = useRef(false);
+  // AI 回复自动播放总开关（只控制“自动触发”，手动点喇叭永远可用）。
+  // 持久化在 localStorage：solace_auto_play = 'on' / 'off'，默认关闭。
+  const [autoPlay, setAutoPlay] = useState(() => {
+    try {
+      return localStorage.getItem("solace_auto_play") === "on";
+    } catch {
+      return false;
+    }
+  });
+  // autoPlay → ref 同步（必须在 autoPlay 声明之后，避免 TDZ）
+  useEffect(() => {
+    autoPlayRef.current = autoPlay;
+  }, [autoPlay]);
+  // 离开聊天页：停掉自动队列（中止请求 / 撤销 URL / 暂停音频），避免泄漏与后台出声。
+  // stopAutoSession 只操作 refs 与稳定的 setState，首次渲染的闭包即可安全使用。
+  useEffect(() => {
+    return () => {
+      stopAutoSession();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [hint, setHint] = useState("");
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [search, setSearch] = useState("");
@@ -435,8 +527,64 @@ export default function Chat() {
       if (saved) diaryContextRef.current = JSON.parse(saved);
     } catch (e) {}
   }, []);
-  // 乐观新建对话时，tempId → 真实对话 id 的 Promise（供"新建后立即发送"等待）
-  const pendingConvRef = useRef({});
+  // 多气泡流式：每条 AI 气泡(ck)已"发出"的分段数；新分段延迟 300-500ms 才显示，模拟真人连发
+  const revealedRef = useRef({});
+  const revealTimersRef = useRef({});
+
+  function clearReveal(ck) {
+    if (revealTimersRef.current[ck]) {
+      clearTimeout(revealTimersRef.current[ck]);
+      delete revealTimersRef.current[ck];
+    }
+    delete revealedRef.current[ck];
+  }
+
+  // 节奏机：fullText 里有多少段，就逐步 revealed+1，每段间隔 300-500ms
+  function pumpReveal(ck, fullText, setMessages) {
+    const segments = splitAiSegments(fullText);
+    const current = revealedRef.current[ck] || 0;
+    if (segments.length <= current) return;
+    // 还有未显示的分段：延迟后 revealed+1
+    const delay = 300 + Math.floor(Math.random() * 200);
+    revealTimersRef.current[ck] = setTimeout(() => {
+      revealedRef.current[ck] = (revealedRef.current[ck] || 0) + 1;
+      // 触发一次重渲染（用一个空的状态更新）
+      setMessages((prev) => [...prev]);
+      // 继续检查是否还有更多分段
+      pumpReveal(ck, fullText, setMessages);
+    }, delay);
+  }
+
+  // 流式回调：更新该气泡的完整文本，并驱动分段节奏
+  function updateAiStream(ck, fullText) {
+    setMessages((prev) =>
+      prev.map((m) => (m.ck === ck ? { ...m, content: fullText } : m))
+    );
+    // 取消上一个未完成的定时器，重新驱动节奏
+    if (revealTimersRef.current[ck]) {
+      clearTimeout(revealTimersRef.current[ck]);
+      delete revealTimersRef.current[ck];
+    }
+    pumpReveal(ck, fullText, setMessages);
+    // 自动播放：开关打开时，文字每增长一次就喂给流式会话（内部按句切分预取）。
+    // 用 ref 读取开关，避免 async 流式回调闭包拿到陈旧的 autoPlay state。
+    if (autoPlayRef.current) {
+      if (autoSessionRef.current?.ck !== ck) startAutoSession(ck);
+      feedAutoSession(fullText);
+    }
+  }
+
+  // 流结束：把剩余分段全部"发出"
+  function finishReveal(ck, fullText) {
+    if (revealTimersRef.current[ck]) {
+      clearTimeout(revealTimersRef.current[ck]);
+      delete revealTimersRef.current[ck];
+    }
+    revealedRef.current[ck] = splitAiSegments(fullText).length;
+    setMessages((prev) => [...prev]);
+    // 通知流式会话文字已结束：残余短句强制成句，队列播完后归位
+    if (autoSessionRef.current?.ck === ck) endAutoSession(fullText);
+  }
 
   function cacheDiaryContext(convId, content) {
     if (!convId) return;
@@ -465,6 +613,10 @@ export default function Chat() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [uploadingBg, setUploadingBg] = useState(false);
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  // 背景待裁剪原图 dataURL；非空时弹出裁剪弹窗（16:9）
+  const [bgCropSrc, setBgCropSrc] = useState(null);
+  // AI 头像待裁剪原图 dataURL；非空时弹出裁剪弹窗（圆形 1:1）
+  const [aiAvatarCropSrc, setAiAvatarCropSrc] = useState(null);
 
   // 「我的」页数据统计：null=加载中（显示"—"），失败静默置 0
   const [stats, setStats] = useState({
@@ -481,21 +633,36 @@ export default function Chat() {
   const messageRefs = useRef({});
 
   useEffect(() => {
+    // 带重试的 session 检查：最多重试 5 次，每次间隔 200ms，
+    // 避免登录后 cookie 尚未生效导致瞬时返回 null 而误跳回登录页
     async function init() {
-      const session = await apiRequest("/api/auth/session");
-      if (!session.user) {
+      const MAX_RETRY = 5;
+      const RETRY_DELAY = 200;
+      let session = null;
+      for (let i = 0; i < MAX_RETRY; i++) {
+        try {
+          session = await apiRequest("/api/auth/session");
+          if (session?.user) break;
+        } catch {
+          // 网络错误，继续重试
+        }
+        if (i < MAX_RETRY - 1) {
+          await new Promise((r) => setTimeout(r, RETRY_DELAY));
+        }
+      }
+      if (!session?.user) {
+        // 重试后仍未登录，才跳回登录页
         window.location.href = "/";
         return;
       }
+      setAuthLoading(false);
       setUser(session.user);
       await loadProfile(session.user.id);
       await loadConversations(session.user.id);
       await loadMessageIndex(session.user.id);
       await loadDiaries(session.user.id);
     }
-    init().catch(() => {
-      window.location.href = "/";
-    });
+    init();
   }, []);
 
   // 监听视口宽度：<1024px 视为小屏，聊天视图隐藏左右栏、改为抽屉唤出
@@ -674,56 +841,23 @@ export default function Chat() {
     }
   }
 
-  // 新建对话：界面立即切换（乐观 UI），数据库写入在后台完成
-  async function handleNewConversation() {
-    const isFresh =
-      currentId && messages.length === 0 && currentId === conversations[0]?.id;
-    if (isFresh) {
-      showHint("已在最新的对话中");
+  // 新建对话：只回到「新对话」模式（不选中任何历史对话），不写入数据库。
+  // 数据库记录要等用户真正发出第一条消息时才创建，避免产生一堆空对话。
+  function handleNewConversation() {
+    if (!currentId && messages.length === 0) {
+      showHint("已经是新对话啦");
       return;
     }
-    if (!user) return;
-
-    // 1) 立即在本地创建临时对话并切换，用户点击瞬间看到空窗口
-    const tempId = "temp-conv-" + Date.now();
-    const tempConv = {
-      id: tempId,
-      user_id: user.id,
-      title: "新对话",
-      created_at: new Date().toISOString(),
-    };
     setHint("");
-    setConversations((prev) => [tempConv, ...prev]);
-    setCurrentId(tempId);
+    setCurrentId(null);
     setMessages([]);
-
-    // 2) 后台写入数据库（不再阻塞界面切换）；promise 供"新建后立即发送"等待
-    const convPromise = (async () => {
-      try {
-        const res = await apiRequest("/api/user/conversations", {
-          method: "POST",
-          body: { title: "新对话" },
-        });
-        const created = res.conversation;
-        if (!created) throw new Error("创建对话失败");
-        // 3) 用真实记录就地替换临时对话（不做全量 loadConversations，省一次往返）
-        setConversations((prev) =>
-          prev.map((c) => (c.id === tempId ? created : c))
-        );
-        setCurrentId((cur) => (cur === tempId ? created.id : cur));
-        return created.id;
-      } catch (err) {
-        // 失败：回滚临时对话
-        setConversations((prev) => prev.filter((c) => c.id !== tempId));
-        setCurrentId((cur) => (cur === tempId ? null : cur));
-        showHint("新建对话失败，请重试");
-        return null;
-      }
-    })();
-    pendingConvRef.current[tempId] = convPromise;
-    convPromise.finally(() => {
-      delete pendingConvRef.current[tempId];
-    });
+    setScrollTarget(null);
+    setHighlightId("");
+    setStreamingReply("");
+    setDiaryReading(false);
+    // 新对话模式没有对应气泡，停掉上一条可能还在播的自动队列
+    stopAutoSession();
+    // 输入框里已打的字保留：它将属于接下来的新对话
   }
 
   async function handleSelect(id) {
@@ -731,6 +865,7 @@ export default function Chat() {
     setScrollTarget(null);
     setHighlightId("");
     setCurrentId(id);
+    stopAutoSession(); // 切换对话：旧回复语音不再继续
     await loadMessages(id);
   }
 
@@ -739,6 +874,7 @@ export default function Chat() {
     const id = result.conversation.id;
     setHint("");
     setCurrentId(id);
+    stopAutoSession(); // 与 handleSelect 一致：切换即停旧语音
 
     if (result.messageId) {
       setScrollTarget(result.messageId);
@@ -938,21 +1074,20 @@ export default function Chat() {
     }
   }
 
-  // 时间轴分组标签：今天 / 昨天 / X天前 / 七天内 / 年月
+  // 时间轴分组标签：今天 / 昨天 / X天前 / 具体日期
   function timeGroupLabel(dateStr) {
-    if (!dateStr) return "更早";
-    const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return "更早";
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-    const diffDays = Math.round((today - that) / 86400000);
-    if (diffDays <= 0) return "今天";
-    if (diffDays === 1) return "昨天";
-    if (diffDays <= 6) return `${diffDays}天前`;
-    if (diffDays <= 29) return "七天内";
-    if (diffDays <= 30) return "三十天内";
-    return `${d.getFullYear()}年${d.getMonth() + 1}月`;
+    return friendlyTimeLabel(dateStr) || "更早";
+  }
+
+  // 本地同步某对话的活动时间：消息一落库即更新，
+  // Sidebar 的排序是据此派生的，对话立刻顶到非置顶组最上方（无需等刷新）
+  function bumpConversationLocal(convId, timeStr) {
+    if (!convId || !timeStr) return;
+    setConversations((prev) =>
+      (prev || []).map((c) =>
+        String(c.id) === String(convId) ? { ...c, last_message_at: timeStr } : c
+      )
+    );
   }
 
   // 新建日记：乐观插入，失败回滚
@@ -1156,6 +1291,7 @@ export default function Chat() {
     // 不再使用列表外的 streamingReply 块，避免交接时闪烁
     const aiCk = "ck-diary-ai-" + Date.now();
     const tempAiId = "temp-diary-ai-" + Date.now();
+    clearReveal(aiCk);
     setMessages((prev) => [
       ...prev,
       { id: tempAiId, ck: aiCk, role: "assistant", content: "" },
@@ -1195,11 +1331,7 @@ export default function Chat() {
               const delta = parsed?.delta;
               if (delta) {
                 fullReply += delta;
-                setMessages((prev) =>
-                  prev.map((m) =>
-                    m.ck === aiCk ? { ...m, content: fullReply } : m
-                  )
-                );
+                updateAiStream(aiCk, fullReply);
               }
             } catch (e) {
               // 忽略单行解析错误
@@ -1211,6 +1343,8 @@ export default function Chat() {
       // 流中断：保留已收到的部分，落库时标注
       if (fullReply) interrupted = true;
     }
+    // 流结束：剩余分段全部发出
+    finishReveal(aiCk, fullReply);
     if (!fullReply) fullReply = "我在。";
 
     // 4) AI 回复落库（中断时标注），成功后气泡就地转正
@@ -1304,19 +1438,8 @@ export default function Chat() {
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || !currentId || sending) return;
+    if (!text || sending) return;
     if (!user) return;
-
-    // 若对话刚乐观新建、数据库还没返回，先等真实对话 id（避免无效外键）
-    let convId = currentId;
-    if (String(convId).startsWith("temp-conv-")) {
-      const pending = pendingConvRef.current[convId];
-      convId = pending ? await pending : null;
-      if (!convId) {
-        showHint("对话还在创建中，请稍等");
-        return;
-      }
-    }
 
     setSending(true);
     setInput("");
@@ -1332,6 +1455,31 @@ export default function Chat() {
       { id: "temp-user-" + Date.now(), ck: userCk, role: "user", content: text },
     ]);
 
+    // 新对话模式（currentId 为 null）：第一条消息发出时才创建对话记录
+    let convId = currentId;
+    if (!convId) {
+      try {
+        const res = await apiRequest("/api/user/conversations", {
+          method: "POST",
+          body: { title: "新对话" },
+        });
+        const created = res.conversation;
+        if (!created?.id) throw new Error("创建对话失败");
+        convId = created.id;
+        // 左侧列表立刻出现该对话并高亮
+        setCurrentId(created.id);
+        setConversations((prev) => [created, ...prev]);
+      } catch (err) {
+        // 创建失败：移除临时气泡、恢复输入框文字，界面回到发送前
+        setMessages((prev) => prev.filter((m) => m.ck !== userCk));
+        setInput(text);
+        setPendingReply(false);
+        setSending(false);
+        showHint("对话创建失败，请重试");
+        return;
+      }
+    }
+
     let userMsg = null;
     try {
       const res = await apiRequest("/api/user/messages", {
@@ -1339,6 +1487,8 @@ export default function Chat() {
         body: { conversationId: convId, role: "user", content: text },
       });
       userMsg = res.message;
+      // 用户消息一落库，对话立即顶到最上
+      bumpConversationLocal(convId, userMsg.created_at);
     } catch (err) {
       userMsg = null;
     }
@@ -1383,17 +1533,16 @@ export default function Chat() {
     // 流式输出：先建一条空的 AI 气泡，收到的文字逐段追加进去
     const aiCk = "ck-ai-" + Date.now();
     const tempAiId = "temp-ai-" + Date.now();
+    clearReveal(aiCk);
     setPendingReply(false);
     setMessages((prev) => [
       ...prev,
       { id: tempAiId, ck: aiCk, role: "assistant", content: "" },
     ]);
 
-    const reply = await askAI(history, (full) => {
-      setMessages((prev) =>
-        prev.map((m) => (m.ck === aiCk ? { ...m, content: full } : m))
-      );
-    });
+    const reply = await askAI(history, (full) => updateAiStream(aiCk, full));
+    // 流结束：把剩余分段全部发出
+    finishReveal(aiCk, reply);
 
     // 流结束（含中途断开）：最终文本落库，再把气泡就地转正
     let aiMsg = null;
@@ -1403,6 +1552,8 @@ export default function Chat() {
         body: { conversationId: convId, role: "assistant", content: reply },
       });
       aiMsg = res.message;
+      // AI 回复落库，活动时间同步为回复时间（已在顶部，保持时间准确）
+      bumpConversationLocal(convId, aiMsg.created_at);
     } catch (err) {
       aiMsg = null;
     }
@@ -1421,6 +1572,347 @@ export default function Chat() {
     setSending(false);
     // 搜索索引后台更新，不阻塞界面
     void loadMessageIndex(user.id);
+  }
+
+  // 撤销当前 blob ObjectURL，避免内存泄漏
+  function revokeTtsUrl() {
+    if (ttsObjectUrlRef.current) {
+      URL.revokeObjectURL(ttsObjectUrlRef.current);
+      ttsObjectUrlRef.current = null;
+    }
+  }
+
+  // 彻底停掉当前音频并复位（切换到另一条 / 播放结束时调用）
+  function stopTts(abortRequest = true) {
+    if (abortRequest && ttsAbortRef.current) {
+      try { ttsAbortRef.current.abort(); } catch {}
+      ttsAbortRef.current = null;
+    }
+    const audio = ttsAudioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      try { audio.pause(); } catch {}
+    }
+    revokeTtsUrl();
+    ttsIdRef.current = null;
+    setTtsLoadingId(null);
+    setTtsPlayingId(null);
+  }
+
+  // iOS 解锁（关键）：必须在用户手势的同步流程里创建 Audio 并调用 play()。
+  // 空 src 产生的 reject 直接吞掉，作用是让音频通道先拿到用户授权；
+  // 手动点喇叭、打开自动播放开关时各调用一次。
+  function unlockAudio() {
+    const audio = new Audio();
+    ttsAudioRef.current = audio;
+    try {
+      const p = audio.play();
+      if (p && p.catch) p.catch(() => {});
+    } catch {}
+    return audio;
+  }
+
+  // 播放核心（手动）：停掉占用音频通道的一切 → 请求 /api/tts → blob → 播放。
+  function startPlayback(msgId, text) {
+    // 用户主动点了某条：自动队列（如有）先整体停下并清空；手动旧条也停掉
+    stopAutoSession();
+    if (ttsPlayingId || ttsLoadingId) stopTts();
+
+    const targetId = msgId;
+    ttsIdRef.current = targetId;
+
+    // 复用已解锁的 Audio 对象；没有（极端情况）则新建
+    const audio = ttsAudioRef.current || new Audio();
+    ttsAudioRef.current = audio;
+
+    setTtsLoadingId(targetId);
+    const controller =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    ttsAbortRef.current = controller;
+
+    (async () => {
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal: controller ? controller.signal : undefined,
+        });
+        if (!res.ok) throw new Error("tts " + res.status);
+        const blob = await res.blob();
+        if (!blob || !blob.size) throw new Error("empty audio");
+        // 回来时若已被取消或切换到别的消息，则丢弃
+        if (ttsIdRef.current !== targetId) return;
+
+        const url = URL.createObjectURL(blob);
+        ttsObjectUrlRef.current = url;
+        audio.src = url;
+
+        audio.onended = () => {
+          if (ttsIdRef.current === targetId) stopTts(false);
+        };
+        audio.onerror = () => {
+          if (ttsIdRef.current === targetId) {
+            stopTts(false);
+            showHint("语音暂时不可用");
+          }
+        };
+
+        const playP = audio.play();
+        if (playP && playP.catch) {
+          playP.catch(() => {
+            if (ttsIdRef.current === targetId) {
+              stopTts(false);
+              showHint("语音暂时不可用");
+            }
+          });
+        }
+        setTtsLoadingId(null);
+        setTtsPlayingId(targetId);
+      } catch (err) {
+        if (err?.name === "AbortError") return; // 主动取消，不提示
+        if (ttsIdRef.current !== targetId) return;
+        stopTts(false);
+        showHint("语音暂时不可用");
+      } finally {
+        if (ttsAbortRef.current === controller) ttsAbortRef.current = null;
+      }
+    })();
+  }
+
+  // 点喇叭：①点的是正在自动播放的这一条 → 暂停当前句并清空剩余队列；
+  // ②手动播放中再点 → 停止；③其它情况 → 在手势内解锁后播放。
+  // 注意：手动播放不受自动播放开关影响，永远可用。
+  function handleToggleTts(msgId, text, ck) {
+    const autoSession = autoSessionRef.current;
+    if (autoSession && autoSession.ck === ck) {
+      stopAutoSession();
+      return;
+    }
+    if (ttsPlayingId === msgId || ttsLoadingId === msgId) {
+      stopTts();
+      return;
+    }
+    unlockAudio();
+    startPlayback(msgId, text);
+  }
+
+  // ===== 流式自动播放会话（"边打字边说话"）=====
+  // 一个会话对应一条 AI 气泡（用稳定 ck 标识）。文字边收边按句切分，
+  // 每句独立请求 /api/tts 预取，音频按 seq 顺序进入单例 Audio 串行播放。
+  // 所有异步回调用 "autoSessionRef.current === session" 作为统一停止闸门。
+
+  // 新建会话：同一时间只允许一个；若手动播放占用音频通道，先停掉。
+  function startAutoSession(ck) {
+    stopAutoSession();
+    if (ttsPlayingId || ttsLoadingId) stopTts();
+    if (!ttsAudioRef.current) ttsAudioRef.current = new Audio();
+    autoSessionRef.current = {
+      ck,
+      active: true,
+      fedLen: 0, // 已消费到 fullText 的第几个字
+      pending: "", // 已消费但还没切出完整句子的残段
+      nextSeq: 0, // 下一个待分派的句子序号
+      expectedSeq: 0, // 队列下一个该播放的序号
+      jobs: new Map(), // seq -> { status: fetching/ready/failed/done, controller, url }
+      playing: false, // 当前是否有一句正在出声
+      textFinished: false, // 文字流是否已结束
+      total: 0,
+      failed: 0,
+      hinted: false,
+    };
+  }
+
+  // 把一句话送去 TTS（不阻塞后续文字），完成后驱动队列
+  function dispatchTtsJob(session, text) {
+    const seq = session.nextSeq++;
+    const controller =
+      typeof AbortController !== "undefined" ? new AbortController() : null;
+    const job = { seq, status: "fetching", controller, url: null };
+    session.jobs.set(seq, job);
+    session.total += 1;
+    if (seq === 0) {
+      setTtsPlayingCk(session.ck); // 首句出现：整条进入播放中态
+    }
+    (async () => {
+      try {
+        const res = await fetch("/api/tts", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+          signal: controller ? controller.signal : undefined,
+        });
+        if (!res.ok) throw new Error("tts " + res.status);
+        const blob = await res.blob();
+        if (!blob || !blob.size) throw new Error("empty audio");
+        // 会话已停止/切换：不创建 URL，直接丢弃，避免泄漏
+        if (autoSessionRef.current !== session || !session.active) return;
+        job.url = URL.createObjectURL(blob);
+        job.status = "ready";
+        pumpAutoQueue(session);
+      } catch (err) {
+        if (err?.name === "AbortError") return; // 主动取消
+        if (autoSessionRef.current !== session || !session.active) return;
+        job.status = "failed"; // 单句失败：跳过，不中断整段
+        session.failed += 1;
+        pumpAutoQueue(session);
+      }
+    })();
+  }
+
+  // 单句播放收尾（onended/onerror/play reject 共用，幂等）
+  function finishTtsJob(session, job) {
+    if (job.status === "done") return;
+    job.status = "done";
+    if (job.url) {
+      try { URL.revokeObjectURL(job.url); } catch {}
+      job.url = null;
+    }
+  }
+
+  // 串行播放队列：按 expectedSeq 顺序取出播放；前句未出声完则等待；
+  // 前序句还在请求时不越过它（保证顺序），失败句直接跳过。
+  function pumpAutoQueue(session) {
+    if (autoSessionRef.current !== session || !session.active) return;
+    const audio = ttsAudioRef.current;
+    while (!session.playing) {
+      const seq = session.expectedSeq;
+      if (seq >= session.nextSeq) {
+        // 已没有已分派的句子
+        if (session.textFinished) {
+          finishAutoSession(session);
+        }
+        return; // 等后续文字 / 等 TTS 请求返回
+      }
+      const job = session.jobs.get(seq);
+      session.expectedSeq += 1;
+      if (job.status === "failed") continue; // 跳过失败句，继续看下一句
+      if (job.status === "fetching") {
+        session.expectedSeq -= 1; // 保序：等它回来
+        return;
+      }
+      // ready：占用 Audio 播放这一句
+      session.playing = true;
+      audio.onended = () => {
+        if (autoSessionRef.current !== session || !session.active) return;
+        finishTtsJob(session, job);
+        session.playing = false;
+        pumpAutoQueue(session);
+      };
+      audio.onerror = () => {
+        if (autoSessionRef.current !== session || !session.active) return;
+        finishTtsJob(session, job);
+        session.failed += 1;
+        session.playing = false;
+        pumpAutoQueue(session);
+      };
+      audio.src = job.url;
+      const playP = audio.play();
+      if (playP && playP.catch) {
+        playP.catch(() => {
+          if (autoSessionRef.current !== session || !session.active) return;
+          finishTtsJob(session, job);
+          session.failed += 1;
+          session.playing = false;
+          pumpAutoQueue(session);
+        });
+      }
+      return;
+    }
+  }
+
+  // 文字流持续喂入：取出新增部分 → 切句 → 逐句预取
+  function feedAutoSession(fullText) {
+    const session = autoSessionRef.current;
+    if (!session || !session.active) return;
+    // 正常流式 fullText 只增不减；若被重置（异常），对齐长度重新累积
+    if (fullText.length < session.fedLen) {
+      session.fedLen = 0;
+      session.pending = "";
+    }
+    session.pending += fullText.slice(session.fedLen);
+    session.fedLen = fullText.length;
+    // 还没有任何句子切出时启用首句快速通道（9字逗号即切/15字硬切）
+    const { sentences, rest } = drainSentences(
+      session.pending,
+      false,
+      session.nextSeq === 0
+    );
+    session.pending = rest;
+    for (const sentence of sentences) dispatchTtsJob(session, sentence);
+    pumpAutoQueue(session);
+  }
+
+  // 文字流结束：残余文字强制成句（即使很短），然后标记收尾
+  function endAutoSession(fullText) {
+    const session = autoSessionRef.current;
+    if (!session || !session.active) return;
+    if (fullText.length >= session.fedLen) {
+      session.pending += fullText.slice(session.fedLen);
+    }
+    session.fedLen = fullText.length;
+    const { sentences } = drainSentences(session.pending, true);
+    session.pending = "";
+    for (const sentence of sentences) dispatchTtsJob(session, sentence);
+    session.textFinished = true;
+    pumpAutoQueue(session);
+  }
+
+  // 队列全部走完：全部句子都失败才提示；状态收敛一次
+  function finishAutoSession(session) {
+    const allFailed = session.total > 0 && session.failed >= session.total;
+    if (allFailed && !session.hinted) {
+      session.hinted = true;
+      showHint("语音暂时不可用");
+    }
+    session.active = false;
+    if (autoSessionRef.current === session) autoSessionRef.current = null;
+    const audio = ttsAudioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+    }
+    setTtsPlayingCk(null);
+  }
+
+  // 中途停止（用户暂停 / 手动切别的 / 关开关 / 切换会话）：
+  // 暂停当前句、中止所有进行中请求、撤销所有待播音频、清空队列。
+  function stopAutoSession() {
+    const session = autoSessionRef.current;
+    if (!session) return;
+    session.active = false;
+    autoSessionRef.current = null;
+    for (const job of session.jobs.values()) {
+      if (job.status === "fetching" && job.controller) {
+        try { job.controller.abort(); } catch {}
+      }
+      if (job.url) {
+        try { URL.revokeObjectURL(job.url); } catch {}
+        job.url = null;
+      }
+    }
+    const audio = ttsAudioRef.current;
+    if (audio) {
+      audio.onended = null;
+      audio.onerror = null;
+      try { audio.pause(); } catch {}
+    }
+    setTtsPlayingCk((cur) => (cur === session.ck ? null : cur));
+  }
+
+  // 切换右上角自动播放开关。打开的这一下属于用户手势，立刻解锁音频，
+  // 之后非手势触发的自动播放（iOS Safari）才不会被拦。
+  function handleToggleAutoPlay() {
+    setAutoPlay((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("solace_auto_play", next ? "on" : "off");
+      } catch {}
+      if (next) unlockAudio();
+      else stopAutoSession(); // 关闭：正在播的队列立刻停下并清空
+      return next;
+    });
   }
 
   // 重新生成某条 AI 回复：删除旧回复 → 找上一条用户消息 → 流式重写该气泡
@@ -1455,6 +1947,8 @@ export default function Chat() {
     const oldMsg = messages[idx];
     // 给重写气泡一个稳定 ck：落库后 id 变化但渲染 key 不变，避免闪烁
     const regenCk = "ck-regen-" + msgId;
+    clearReveal(regenCk);
+    stopAutoSession(); // 旧回复若正在自动播放，先停掉再重写
     setSending(true);
     setRegenId(msgId);
     let reply = "";
@@ -1480,12 +1974,9 @@ export default function Chat() {
           .map((m) => ({ role: m.role, content: m.content })),
       ];
 
-      // 4. 流式重写该气泡（复用 askAI）
-      reply = await askAI(history, (full) => {
-        setMessages((prev) =>
-          prev.map((m) => (m.id === msgId ? { ...m, content: full } : m))
-        );
-      });
+      // 4. 流式重写该气泡（复用 askAI，多气泡节奏）
+      reply = await askAI(history, (full) => updateAiStream(regenCk, full));
+      finishReveal(regenCk, reply);
 
       // 5. 新回复落库：沿用原 created_at，刷新后气泡位置不变
       const res = await apiRequest("/api/user/messages", {
@@ -1538,8 +2029,10 @@ export default function Chat() {
     }
   }
 
-  // 设置面板：上传聊天背景 / AI 头像（前端压缩成 data URL 后存后端）
-  async function handleSettingUpload(file, kind) {
+  // 背景图选图：校验后读出原图，弹出 16:9 裁剪弹窗（不立即上传）
+  function handleBgFileChange(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
     if (!file.type.startsWith("image/")) {
       showHint("请选择图片文件");
@@ -1549,30 +2042,72 @@ export default function Chat() {
       showHint("图片不能超过 5MB");
       return;
     }
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      window.location.href = "/";
-      return;
-    }
-    const isBg = kind === "bg";
-    const column = isBg ? "chat_background_url" : "ai_avatar_url";
-    const setUploading = isBg ? setUploadingBg : setUploadingAvatar;
-    setUploading(true);
+    const reader = new FileReader();
+    reader.onload = () => setBgCropSrc(reader.result);
+    reader.onerror = () => showHint("图片读取失败");
+    reader.readAsDataURL(file);
+  }
+
+  // 背景裁剪确认：上传裁剪结果，实时预览不刷新
+  async function handleBgCropped(dataUrl) {
+    setUploadingBg(true);
     try {
-      const dataUrl = await compressImageToDataUrl(file);
       const upRes = await apiRequest("/api/user/upload", {
         method: "POST",
-        body: { kind: isBg ? "background" : "aiAvatar", dataUrl },
+        body: { kind: "background", dataUrl },
       });
       const url = upRes.url || dataUrl;
-      // 本地同步，实时生效无需刷新
-      setProfile((prev) => ({ ...(prev || {}), [column]: url }));
-      showHint(isBg ? "背景已更新" : "AI 头像已更新");
+      setProfile((prev) => ({
+        ...(prev || {}),
+        chat_background_url: url,
+      }));
+      setBgCropSrc(null);
+      showHint("背景已更新");
     } catch (err) {
-      console.error("上传失败:", err);
       showHint("上传失败，请重试");
     } finally {
-      setUploading(false);
+      setUploadingBg(false);
+    }
+  }
+
+  // AI 头像选图：校验后读出原图，弹出圆形 1:1 裁剪弹窗（不立即上传）
+  function handleAiAvatarFileChange(e) {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      showHint("请选择图片文件");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      showHint("图片不能超过 5MB");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setAiAvatarCropSrc(reader.result);
+    reader.onerror = () => showHint("图片读取失败");
+    reader.readAsDataURL(file);
+  }
+
+  // AI 头像裁剪确认：上传裁剪结果，实时预览不刷新
+  async function handleAiAvatarCropped(dataUrl) {
+    setUploadingAvatar(true);
+    try {
+      const upRes = await apiRequest("/api/user/upload", {
+        method: "POST",
+        body: { kind: "aiAvatar", dataUrl },
+      });
+      const url = upRes.url || dataUrl;
+      setProfile((prev) => ({
+        ...(prev || {}),
+        ai_avatar_url: url,
+      }));
+      setAiAvatarCropSrc(null);
+      showHint("AI 头像已更新");
+    } catch (err) {
+      showHint("上传失败，请重试");
+    } finally {
+      setUploadingAvatar(false);
     }
   }
 
@@ -1631,6 +2166,11 @@ export default function Chat() {
   // AI 头像与聊天背景：读 profiles，设置面板保存后经 setProfile 实时生效
   const aiAvatarUrl = profile?.ai_avatar_url || "";
   const chatBgUrl = profile?.chat_background_url || "";
+  // AI 气泡底色：有自定义背景图时用独立半透明白底（+轻微毛玻璃）保证文字清晰；
+  // 无背景图时保持原淡灰，在米白底色上外观不变
+  const aiBubbleBg = chatBgUrl
+    ? "bg-white/75 backdrop-blur-sm"
+    : "bg-[#f1f3f2]";
   const currentTitle = conversations.find((c) => c.id === currentId)?.title;
 
   // 侧边栏内容：桌面内联与小屏抽屉共用
@@ -1816,6 +2356,18 @@ export default function Chat() {
     </>
   );
 
+  // 认证检查中：显示加载占位，避免渲染半成品界面或误跳转
+  if (authLoading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-[#fafaf8]">
+        <div className="flex flex-col items-center gap-3">
+          <span className="text-2xl font-bold text-[#5b8aa6]">Solace</span>
+          <span className="text-sm text-slate-400">加载中…</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen flex flex-col bg-[#fafaf8] text-slate-800">
       {/* 顶部导航栏：左 Logo，右三个标签（固定在页面最上方） */}
@@ -1877,21 +2429,22 @@ export default function Chat() {
             )}
 
             {/* 中间：消息列表 + 输入框 */}
-            <div
-              className="flex-1 h-full flex flex-col min-w-0 relative"
-              style={
-                chatBgUrl
-                  ? {
-                      backgroundImage: `url(${chatBgUrl})`,
-                      backgroundSize: "cover",
-                      backgroundPosition: "center",
-                    }
-                  : undefined
-              }
-            >
-              {/* 半透明白色遮罩：背景图上保证文字可读 */}
+            <div className="flex-1 h-full flex flex-col min-w-0 relative">
+              {/* 背景图层：独立一层（filter 只作用于图片，不模糊前景），
+                  cover 铺满 + 轻微降饱和，避免抢眼 */}
               {chatBgUrl && (
-                <div className="absolute inset-0 bg-white/[0.85] pointer-events-none" />
+                <div
+                  className="absolute inset-0 pointer-events-none bg-center bg-cover"
+                  style={{
+                    backgroundImage: `url(${chatBgUrl})`,
+                    filter: "blur(0.5px) saturate(0.9)",
+                  }}
+                />
+              )}
+              {/* 暖色（solace-cream）薄遮罩：0.45，让背景图醒目但色调统一；
+                  可读性交给气泡自身的独立半透明背景，不靠加厚遮罩 */}
+              {chatBgUrl && (
+                <div className="absolute inset-0 pointer-events-none bg-[rgba(253,251,247,0.45)]" />
               )}
           <div className="relative flex items-center border-b border-[#e8eae7] px-3 py-2">
             <button
@@ -1911,11 +2464,52 @@ export default function Chat() {
             ) : (
               <span className="ml-auto" />
             )}
+            {/* 自动播放语音开关：关闭=静音喇叭（带斜杠），开启=正常喇叭。点击区 ≥44px */}
+            <button
+              type="button"
+              onClick={handleToggleAutoPlay}
+              title={autoPlay ? "关闭自动播放语音" : "开启自动播放语音"}
+              aria-label={autoPlay ? "关闭自动播放语音" : "开启自动播放语音"}
+              aria-pressed={autoPlay}
+              className={`${btnBase} w-11 h-11 sm:w-8 sm:h-8 p-0 ml-2 shrink-0 flex items-center justify-center ${
+                autoPlay ? "text-[#7fa8c4]" : "text-slate-400"
+              }`}
+            >
+              {autoPlay ? (
+                <svg
+                  className="w-4 h-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                </svg>
+              ) : (
+                <svg
+                  className="w-4 h-4"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <line x1="23" y1="9" x2="17" y2="15" />
+                  <line x1="17" y1="9" x2="23" y2="15" />
+                </svg>
+              )}
+            </button>
             {/* 设置按钮 */}
             <button
               onClick={() => setSettingsOpen(!settingsOpen)}
               title="设置"
-              className={`${btnBase} px-2 py-1 ml-2 shrink-0`}
+              className={`${btnBase} w-11 h-11 sm:w-auto sm:h-auto sm:px-2 sm:py-1 p-0 ml-2 shrink-0 flex items-center justify-center`}
             >
               ⚙
             </button>
@@ -1943,10 +2537,7 @@ export default function Chat() {
                           type="file"
                           accept="image/*"
                           className="hidden"
-                          onChange={(e) => {
-                            handleSettingUpload(e.target.files?.[0], "bg");
-                            e.target.value = "";
-                          }}
+                          onChange={handleBgFileChange}
                         />
                       </label>
                       {chatBgUrl && (
@@ -1984,13 +2575,7 @@ export default function Chat() {
                           type="file"
                           accept="image/*"
                           className="hidden"
-                          onChange={(e) => {
-                            handleSettingUpload(
-                              e.target.files?.[0],
-                              "aiAvatar"
-                            );
-                            e.target.value = "";
-                          }}
+                          onChange={handleAiAvatarFileChange}
                         />
                       </label>
                       {aiAvatarUrl && (
@@ -2010,17 +2595,32 @@ export default function Chat() {
           </div>
 
         <div className="relative flex-1 overflow-y-auto px-4 py-4">
-          {!currentId && !streamingReply && !diaryReading && (
-            <p className="text-sm text-slate-400 text-center mt-10">
-              选择或新建一个对话，慢慢说，我在。
-            </p>
-          )}
+          {/* 新对话模式的欢迎词：居中、比正文大一号、半透明深灰，
+              叠加在背景图之上且不遮挡它（pointer-events-none）。
+              打字期间仍显示；第一条消息发出（messages 出现气泡）后消失 */}
+          {!currentId &&
+            messages.length === 0 &&
+            !streamingReply &&
+            !diaryReading && (
+              <div className="absolute inset-0 flex items-center justify-center px-6 pointer-events-none">
+                <p className="text-[22px] leading-9 text-slate-800/50 text-center font-medium">
+                  你来啦，今天打算和我分享什么？
+                </p>
+              </div>
+            )}
 
           {messages.map((m) => {
             const isUser = m.role === "user";
             // ck 是临时气泡"转正"时保持不变的渲染 key，避免 DOM 卸载导致的闪烁
             const renderKey = m.ck || m.id;
             const highlighted = highlightId === m.id;
+            // AI 消息按 \n 切成多段，模拟真人连发短消息
+            const segments = isUser ? [] : splitAiSegments(m.content);
+            const revealed = isUser ? 0 : revealedRef.current[renderKey] ?? segments.length;
+            // 已完成分段 + 正在输入的分段（如果 revealed 还没到末尾）
+            const visibleCount = Math.min(revealed + 1, segments.length);
+            const showSegments = segments.slice(0, visibleCount);
+            const isLastTyping = revealed < segments.length;
             return (
               <div
                 key={renderKey}
@@ -2037,51 +2637,121 @@ export default function Chat() {
                     isUser ? "items-end" : "items-start"
                   }`}
                 >
-                  <div
-                    className={`max-w-full px-3 py-2 text-sm leading-6 whitespace-pre-wrap break-words rounded-2xl transition-shadow duration-300 ${
-                      isUser
-                        ? "bg-[#7fa8c4] text-white rounded-br-md"
-                        : "bg-[#f1f3f2] text-slate-800 rounded-bl-md"
-                    } ${highlighted ? "ring-2 ring-[#8fb3c7]" : ""}`}
-                  >
-                    {!m.content &&
-                    (m.id === regenId || String(m.id).startsWith("temp-")) ? (
-                      // 空临时气泡 / 重新生成中：显示思考点点
-                      <div className="flex gap-1">
-                        {[0, 150, 300].map((delay) => (
-                          <span
-                            key={delay}
-                            className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                            style={{ animationDelay: `${delay}ms` }}
-                          />
-                        ))}
-                      </div>
-                    ) : (
-                      m.content
-                    )}
-                  </div>
-                  {/* 重新生成：悬停 AI 气泡时显示 */}
-                  {!isUser && !String(m.id).startsWith("temp-") && m.content && (
-                    <button
-                      onClick={() => handleRegenerate(m.id)}
-                      disabled={sending || m.id === regenId}
-                      title="重新生成"
-                      className="mt-1 text-xs text-slate-400 hover:text-[#7fa8c4] transition-all duration-150 opacity-0 group-hover:opacity-100 disabled:opacity-50 self-start flex items-center gap-1"
+                  {/* 用户消息：单气泡 */}
+                  {isUser && (
+                    <div
+                      className={`max-w-full px-3 py-2 text-sm leading-6 whitespace-pre-wrap break-words rounded-2xl transition-shadow duration-300 bg-[#7fa8c4] text-white rounded-br-md ${highlighted ? "ring-2 ring-[#8fb3c7]" : ""}`}
                     >
-                      <svg
-                        className="w-3 h-3"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                      {m.content}
+                    </div>
+                  )}
+
+                  {/* AI 消息：按分段渲染多个气泡 */}
+                  {!isUser && showSegments.length === 0 && !m.content && (m.id === regenId || String(m.id).startsWith("temp-")) && (
+                    // 空临时气泡 / 重新生成中：显示思考点点
+                    <div className={`${aiBubbleBg} px-3 py-2 rounded-2xl rounded-bl-md flex gap-1`}>
+                      {[0, 150, 300].map((delay) => (
+                        <span
+                          key={delay}
+                          className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
+                          style={{ animationDelay: `${delay}ms` }}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {!isUser && showSegments.map((seg, i) => (
+                    <div
+                      key={`${renderKey}-${i}`}
+                      className={`max-w-full px-3 py-2 text-sm leading-6 break-words rounded-2xl ${aiBubbleBg} text-slate-800 rounded-bl-md ${
+                        i < showSegments.length - 1 ? "mb-1" : ""
+                      } shadow-sm ${highlighted ? "ring-2 ring-[#8fb3c7]" : ""}`}
+                    >
+                      {seg}
+                    </div>
+                  ))}
+
+                  {/* 操作区：播放语音 + 重新生成。电脑端悬停才显示，移动端无 hover → 常显 */}
+                  {!isUser && !String(m.id).startsWith("temp-") && m.content && (
+                    <div className="mt-1 flex items-center gap-1 self-start opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150">
+                      {/* 喇叭按钮：空闲喇叭 / 加载中旋转 / 播放中暂停；点击区 ≥44px */}
+                      <button
+                        type="button"
+                        onClick={() => handleToggleTts(m.id, m.content, m.ck)}
+                        title={
+                          ttsPlayingId === m.id || ttsPlayingCk === m.ck
+                            ? "暂停"
+                            : "播放语音"
+                        }
+                        aria-label={
+                          ttsPlayingId === m.id || ttsPlayingCk === m.ck
+                            ? "暂停语音"
+                            : "播放语音"
+                        }
+                        className="w-11 h-11 sm:w-7 sm:h-7 flex items-center justify-center text-slate-400 hover:text-[#7fa8c4] transition-colors duration-150"
                       >
-                        <polyline points="23 4 23 10 17 10" />
-                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                      </svg>
-                      重新生成
-                    </button>
+                        {ttsLoadingId === m.id ? (
+                          <svg
+                            className="w-4 h-4 animate-spin"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                          >
+                            <path d="M21 12a9 9 0 1 1-6.22-8.56" />
+                          </svg>
+                        ) : ttsPlayingId === m.id || ttsPlayingCk === m.ck ? (
+                          <svg
+                            className="w-4 h-4"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <rect x="6" y="4" width="4" height="16" rx="1" />
+                            <rect x="14" y="4" width="4" height="16" rx="1" />
+                          </svg>
+                        ) : (
+                          <svg
+                            className="w-4 h-4"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                            <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+                            <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+                          </svg>
+                        )}
+                      </button>
+
+                      <button
+                        onClick={() => handleRegenerate(m.id)}
+                        disabled={sending || m.id === regenId}
+                        title="重新生成"
+                        className="w-11 h-11 sm:w-auto sm:h-auto sm:px-1 flex items-center justify-center gap-1 text-xs text-slate-400 hover:text-[#7fa8c4] transition-colors duration-150 disabled:opacity-50"
+                      >
+                        <svg
+                          className="w-3.5 h-3.5"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <polyline points="23 4 23 10 17 10" />
+                          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                        </svg>
+                        <span className="hidden sm:inline">重新生成</span>
+                      </button>
+                    </div>
                   )}
                 </div>
                 {isUser && <UserAvatar url={avatarUrl} name={displayName} />}
@@ -2093,7 +2763,7 @@ export default function Chat() {
           {pendingReply && (
             <div className="flex items-start gap-2 mb-3 justify-start">
               <AiAvatar url={profile?.ai_avatar_url} />
-              <div className="bg-[#f1f3f2] px-3 py-2 rounded-2xl rounded-bl-md flex gap-1">
+              <div className={`${aiBubbleBg} px-3 py-2 rounded-2xl rounded-bl-md flex gap-1`}>
                 {[0, 150, 300].map((delay) => (
                   <span
                     key={delay}
@@ -2124,7 +2794,7 @@ export default function Chat() {
             />
             <button
               onClick={handleSend}
-              disabled={sending || !currentId}
+              disabled={sending}
               className={`${btnBase} px-4 shrink-0`}
             >
               {sending ? "…" : "发送"}
@@ -2480,6 +3150,37 @@ export default function Chat() {
         onConfirm={confirmState?.onConfirm}
         onClose={() => setConfirmState(null)}
       />
+
+      {/* 聊天背景裁剪弹窗：可在横屏 16:9 / 竖屏 9:16 间切换，默认横屏 */}
+      {bgCropSrc && (
+        <ImageCropper
+          imageSrc={bgCropSrc}
+          cropShape="rect"
+          title="裁剪聊天背景"
+          maxSide={1280}
+          busy={uploadingBg}
+          aspectOptions={[
+            { label: "横屏 16:9", value: 16 / 9 },
+            { label: "竖屏 9:16", value: 9 / 16 },
+          ]}
+          onCancel={() => setBgCropSrc(null)}
+          onConfirm={handleBgCropped}
+        />
+      )}
+
+      {/* AI 头像裁剪弹窗：圆形 1:1 */}
+      {aiAvatarCropSrc && (
+        <ImageCropper
+          imageSrc={aiAvatarCropSrc}
+          aspect={1}
+          cropShape="round"
+          title="裁剪 AI 头像"
+          maxSide={512}
+          busy={uploadingAvatar}
+          onCancel={() => setAiAvatarCropSrc(null)}
+          onConfirm={handleAiAvatarCropped}
+        />
+      )}
 
       {/* 个性签名编辑弹窗（日记页顶部卡片唤出，保存逻辑共用 handleSaveBio） */}
       <BioModal

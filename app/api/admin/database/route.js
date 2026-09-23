@@ -143,6 +143,6 @@ export async function POST(request) {
     });
   } catch (err) {
     if (err.code === "DB_TEST_FAILED") return jsonError(err.message, 400);
-    return jsonError(describeDbError(err), 500);
+    return jsonError(describeDbError(err, { detailed: true }), 500);
   }
 }

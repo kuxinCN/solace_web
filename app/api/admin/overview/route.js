@@ -4,6 +4,7 @@
  */
 import { getAdminFromRequest, listAuditLogs } from "@/lib/admin-auth";
 import { describeDbError, getPublicDatabaseConfig, query } from "@/lib/db";
+import { ensureUserColumnsOnce } from "@/lib/schema";
 import { getGroup } from "@/lib/settings";
 import { json, jsonError } from "@/lib/util";
 
@@ -29,6 +30,9 @@ export async function GET(request) {
   let logs = [];
 
   try {
+    // 老部署升级时先补上新列，避免后台各处查询报 Unknown column
+    await ensureUserColumnsOnce();
+
     const versionRows = await query("SELECT VERSION() AS version");
     dbStatus = { connected: true, version: versionRows[0]?.version || "", error: "" };
 
@@ -43,7 +47,7 @@ export async function GET(request) {
 
     logs = await listAuditLogs(8);
   } catch (err) {
-    dbStatus = { connected: false, version: "", error: describeDbError(err) };
+    dbStatus = { connected: false, version: "", error: describeDbError(err, { detailed: true }) };
   }
 
   const [ai, tts, smtp, login, site] = await Promise.all([

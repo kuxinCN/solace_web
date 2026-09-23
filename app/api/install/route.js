@@ -38,6 +38,7 @@ import {
   reinstallAllowed,
   writeInstallLock,
 } from "@/lib/install";
+import { rateLimit } from "@/lib/rate-limit";
 import { ensureTables, ensureUserColumns } from "@/lib/schema";
 import { getGroup, saveGroup } from "@/lib/settings";
 import {
@@ -120,6 +121,15 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  // 安装/重装入口是公开的，按 IP 限流，避免被人拿来爆破重装口令
+  const quota = rateLimit(`install:${clientIp(request) || "direct"}`, {
+    limit: 10,
+    windowMs: 10 * 60 * 1000,
+  });
+  if (!quota.ok) {
+    return jsonError(`操作太频繁，请 ${quota.retryAfterSeconds} 秒后再试`, 429);
+  }
+
   const state = await getInstallState();
   if (state.installed && !reinstallAllowed()) {
     return jsonError(
@@ -245,7 +255,7 @@ export async function POST(request) {
     dbResult = await applyDatabaseConfig(incoming);
   } catch (err) {
     if (err.code === "DB_TEST_FAILED") return jsonError(err.message, 400);
-    return jsonError(describeDbError(err), 500);
+    return jsonError(describeDbError(err, { detailed: true }), 500);
   }
 
   // 2) 自动建表
@@ -253,7 +263,7 @@ export async function POST(request) {
   try {
     tableResult = await ensureTables();
   } catch (err) {
-    return jsonError(`建表失败：${describeDbError(err)}`, 500);
+    return jsonError(`建表失败：${describeDbError(err, { detailed: true })}`, 500);
   }
   if (tableResult.missing.length) {
     return jsonError(`以下数据表创建失败：${tableResult.missing.join("、")}`, 500);
@@ -263,7 +273,7 @@ export async function POST(request) {
   try {
     await ensureUserColumns();
   } catch (err) {
-    return jsonError(`升级 users 表失败：${describeDbError(err)}`, 500);
+    return jsonError(`升级 users 表失败：${describeDbError(err, { detailed: true })}`, 500);
   }
 
   // 3) 创建管理员（重新安装模式下会先清空旧的管理员与登录会话）
@@ -293,7 +303,7 @@ export async function POST(request) {
         403
       );
     }
-    return jsonError(`创建管理员失败：${describeDbError(err)}`, 500);
+    return jsonError(`创建管理员失败：${describeDbError(err, { detailed: true })}`, 500);
   }
 
   // 4) 写入站点名称（失败不影响安装）

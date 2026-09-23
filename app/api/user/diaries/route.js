@@ -1,5 +1,6 @@
 /** 日记：列表 / 新增 / 编辑 / 删除 */
 import { describeDbError, execute, query } from "@/lib/db";
+import { ensureDiaryColumnsOnce } from "@/lib/schema";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
 
@@ -20,8 +21,11 @@ export async function GET(request) {
   if (!user) return jsonError("请先登录", 401);
 
   try {
+    // 老部署升级时自动补 mood 列
+    await ensureDiaryColumnsOnce();
+
     const diaries = await query(
-      "SELECT id, user_id, title, content, created_at FROM diaries WHERE user_id = ? ORDER BY id DESC",
+      "SELECT id, user_id, title, content, mood, created_at FROM diaries WHERE user_id = ? ORDER BY id DESC",
       [user.id]
     );
     return json({ ok: true, diaries });
@@ -74,6 +78,8 @@ export async function PATCH(request) {
     if (!content) return jsonError("正文不能为空", 400);
     sets.push("content = ?");
     params.push(content);
+    // 正文改了，之前的情绪标签不再适用，清掉等重新分析（前端可再次调用 /mood）
+    sets.push("mood = NULL");
   }
   if (!sets.length) return jsonError("没有需要修改的内容", 400);
 

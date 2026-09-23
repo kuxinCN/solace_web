@@ -1,5 +1,6 @@
 /** 聊天消息：按会话读取 / 追加一条 / 删除一条（「重新生成」会用到删除） */
 import { describeDbError, execute, query } from "@/lib/db";
+import { ensureUserColumnsOnce } from "@/lib/schema";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody, toMysqlDateTime } from "@/lib/util";
 
@@ -70,6 +71,8 @@ export async function POST(request) {
       : toMysqlDateTime(new Date());
 
   try {
+    await ensureUserColumnsOnce();
+
     if (!(await ownsConversation(conversationId, user.id))) {
       return jsonError("会话不存在", 404);
     }
@@ -78,6 +81,13 @@ export async function POST(request) {
       `INSERT INTO messages (conversation_id, user_id, role, content, created_at)
        VALUES (?, ?, ?, ?, ?)`,
       [conversationId, user.id, role, content, createdAt]
+    );
+
+    // 同步更新对话活动时间 = 本条消息时间。
+    // 正常发送即 NOW()，旧对话因此顶到列表最上；重新生成时沿用其指定时间，语义一致。
+    await execute(
+      "UPDATE conversations SET last_message_at = ? WHERE id = ? AND user_id = ?",
+      [createdAt, conversationId, user.id]
     );
 
     return json({

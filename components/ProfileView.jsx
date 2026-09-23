@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import NicknameEditor from "@/components/NicknameEditor";
+import ImageCropper from "@/components/ImageCropper";
 
 async function apiRequest(path, options = {}) {
   const res = await fetch(path, {
@@ -14,32 +15,6 @@ async function apiRequest(path, options = {}) {
   try { data = await res.json(); } catch { data = null; }
   if (!res.ok) throw new Error(data?.error || `请求失败（HTTP ${res.status}）`);
   return data || {};
-}
-
-// 把上传的图片居中裁成正方形并压缩
-function fileToAvatarDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const size = 256;
-        const canvas = document.createElement("canvas");
-        canvas.width = size;
-        canvas.height = size;
-        const ctx = canvas.getContext("2d");
-        const side = Math.min(img.width, img.height);
-        const sx = (img.width - side) / 2;
-        const sy = (img.height - side) / 2;
-        ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
-        resolve(canvas.toDataURL("image/jpeg", 0.85));
-      };
-      img.onerror = reject;
-      img.src = reader.result;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
 
 // 计算年龄：年份相减，今年生日未到则减 1；闰年由 Date 自动处理
@@ -100,6 +75,8 @@ export default function ProfileView({
   const [savingProfile, setSavingProfile] = useState(false);
   const [avatarUploading, setAvatarUploading] = useState(false);
   const [msg, setMsg] = useState("");
+  // 待裁剪原图 dataURL；非空时弹出裁剪弹窗
+  const [cropSrc, setCropSrc] = useState(null);
 
   // 邮箱修改
   const [emailEditing, setEmailEditing] = useState(false);
@@ -120,26 +97,43 @@ export default function ProfileView({
     setAvatarUrl(profile?.avatar_url || "");
   }, [profile]);
 
-  // 上传头像：本地 canvas 压成 data URL，交给后端上传接口保存
-  async function handleAvatarChange(e) {
+  // 选择图片：校验后读出原图 dataURL，弹出裁剪弹窗（不立即上传）
+  function handleAvatarChange(e) {
     const file = e.target.files?.[0];
+    e.target.value = "";
     if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setMsg("请选择图片文件");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setMsg("图片不能超过 5MB");
+      return;
+    }
+    setMsg("");
+    const reader = new FileReader();
+    reader.onload = () => setCropSrc(reader.result);
+    reader.onerror = () => setMsg("图片读取失败");
+    reader.readAsDataURL(file);
+  }
+
+  // 裁剪确认：上传裁剪结果，实时预览
+  async function handleAvatarCropped(dataUrl) {
     setAvatarUploading(true);
     setMsg("");
     try {
-      const dataUrl = await fileToAvatarDataUrl(file);
       const { url } = await apiRequest("/api/user/upload", {
         method: "POST",
         body: { kind: "avatar", dataUrl },
       });
       setAvatarUrl(url);
       setMsg("头像更新成功");
+      setCropSrc(null);
       onSaved?.();
     } catch (err) {
       setMsg("头像上传失败：" + err.message);
     } finally {
       setAvatarUploading(false);
-      e.target.value = "";
     }
   }
 
@@ -460,6 +454,20 @@ export default function ProfileView({
         >
           退出登录
         </button>
+      )}
+
+      {/* 头像裁剪弹窗：圆形 1:1 */}
+      {cropSrc && (
+        <ImageCropper
+          imageSrc={cropSrc}
+          aspect={1}
+          cropShape="round"
+          title="裁剪头像"
+          maxSide={512}
+          busy={avatarUploading}
+          onCancel={() => setCropSrc(null)}
+          onConfirm={handleAvatarCropped}
+        />
       )}
     </div>
   );

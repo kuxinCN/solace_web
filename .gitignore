@@ -3,6 +3,10 @@ node_modules/
 .env.*
 !.env.example
 *.env
+config/db.json
+config/installed.lock
+.next/
 dist/
 build/
+logs/
 .DS_Store

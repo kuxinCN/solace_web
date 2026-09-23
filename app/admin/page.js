@@ -45,22 +45,73 @@ async function api(path, options = {}) {
 const FIELDS = {
   ai: [
     { key: "enabled", label: "启用对话 AI", type: "boolean", hint: "关闭后 /api/chat 只会返回兜底文案" },
-    { key: "baseUrl", label: "接口地址", type: "text", hint: "只填到版本目录（如 https://open.bigmodel.cn/api/paas/v4），程序自动拼 /chat/completions" },
-    { key: "apiKey", label: "API Key", type: "secret" },
-    { key: "model", label: "模型名", type: "text", hint: "例如 glm-4-flash、gpt-4o-mini" },
+    {
+      key: "baseUrl",
+      label: "接口地址（OpenAI 协议）",
+      type: "text",
+      hint: "填到版本目录即可（如 https://api.xiaomimimo.com/v1），也支持直接粘官方文档给的完整地址（…/v1/chat/completions），程序会自动识别。例：智谱 https://open.bigmodel.cn/api/paas/v4 ｜ DeepSeek https://api.deepseek.com/v1 ｜ OpenAI https://api.openai.com/v1",
+    },
+    {
+      key: "apiKey",
+      label: "API Key（OpenAI 协议）",
+      type: "secret",
+      hint: "⚠️ 这里填的必须是「OpenAI 兼容协议」的 Key：智谱、DeepSeek、通义、Moonshot、OpenAI 官方等都支持。不是 OpenAI 协议的厂商（接口路径/请求体格式不同）直接填这里会报错",
+    },
+    { key: "model", label: "模型名", type: "text", hint: "例如 glm-4-flash、deepseek-chat、gpt-4o-mini" },
     { key: "temperature", label: "温度（0-2）", type: "number", step: "0.1" },
     { key: "maxTokens", label: "最大回复长度", type: "number" },
     { key: "timeoutSeconds", label: "超时（秒）", type: "number" },
     { key: "provider", label: "服务商备注", type: "text", hint: "仅作记录，不影响调用" },
+    {
+      key: "systemPrompt",
+      label: "AI 提示词（人设）",
+      type: "textarea",
+      rows: 16,
+      hint: "AI 的角色设定与说话风格。保存后立即生效，不用重启服务。留空则使用前端自带的提示词。",
+    },
+    {
+      key: "diaryPrompt",
+      label: "读日记时的附加提示词",
+      type: "textarea",
+      rows: 4,
+      hint: "用户写完日记后，这段文字会和日记正文一起发给 AI。用 {diary} 表示日记正文的位置。",
+    },
   ],
   tts: [
     { key: "enabled", label: "启用语音合成", type: "boolean" },
-    { key: "baseUrl", label: "接口地址", type: "text", hint: "程序会自动拼 /audio/speech（OpenAI 兼容格式）" },
-    { key: "apiKey", label: "API Key", type: "secret" },
-    { key: "model", label: "模型名", type: "text", hint: "例如 tts-1，按服务商文档填写" },
-    { key: "voice", label: "默认音色", type: "text", hint: "例如 alloy、zh-CN-XiaoxiaoNeural" },
-    { key: "speed", label: "语速（0.5-2）", type: "number", step: "0.1" },
-    { key: "format", label: "音频格式", type: "text", hint: "常见为 mp3" },
+    {
+      key: "provider",
+      label: "接口类型",
+      type: "select",
+      options: [
+        { value: "openai-compatible", label: "OpenAI 兼容（POST /audio/speech，接口直接返回音频）" },
+        { value: "mimo-chat", label: "小米 MiMo（POST /chat/completions，音频是 base64）" },
+      ],
+      hint: "不同服务商的接口格式不一样，选错了会报 400 / Invalid request",
+    },
+    {
+      key: "baseUrl",
+      label: "接口地址",
+      type: "text",
+      hint: "两种填法都行：只填 https://api.xiaomimimo.com/v1 ，或直接粘官方文档里的完整地址 https://api.xiaomimimo.com/v1/chat/completions 。注意别填成文档网页地址（mimo.mi.com/docs/...）。OpenAI 系填 https://api.openai.com/v1",
+    },
+    { key: "apiKey", label: "API Key", type: "secret", hint: "小米 MiMo 走 api-key 请求头、其他走 Bearer，程序会按接口类型自动处理" },
+    { key: "model", label: "模型名", type: "text", hint: "小米 MiMo 填 mimo-v2.5-tts ；OpenAI 系填 tts-1 之类" },
+    {
+      key: "voice",
+      label: "默认音色",
+      type: "text",
+      hint: "小米 MiMo：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 / Mia / Chloe / Milo / Dean ；OpenAI：alloy 等",
+    },
+    { key: "speed", label: "语速（0.5-2）", type: "number", step: "0.1", hint: "仅 OpenAI 兼容接口支持，小米 MiMo 接口会忽略它" },
+    { key: "format", label: "音频格式", type: "text", hint: "常用 mp3 ；小米 MiMo 支持 wav / mp3 / pcm" },
+    {
+      key: "stylePrompt",
+      label: "朗读风格指令（仅小米 MiMo 生效）",
+      type: "textarea",
+      rows: 3,
+      hint: "用自然语言描述想要的语气，会作为 user 消息发给 MiMo（例如：用温柔、缓慢、轻声细语的语调朗读）。留空则不发送；OpenAI 兼容协议会忽略这项。",
+    },
     { key: "timeoutSeconds", label: "超时（秒）", type: "number" },
   ],
   smtp: [
@@ -234,12 +285,30 @@ function SettingsGroup({ group, title, description, settings, onSaved, setError,
             );
           }
 
+          if (field.type === "select") {
+            return (
+              <Field key={field.key} label={field.label} hint={field.hint}>
+                <select
+                  value={textValue(field.key)}
+                  onChange={(e) => setValue(field.key, e.target.value)}
+                  className={inputClass}
+                >
+                  {(field.options || []).map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            );
+          }
+
           if (field.type === "textarea") {
             return (
               <div key={field.key} className="md:col-span-2">
                 <Field label={field.label} hint={field.hint}>
                   <textarea
-                    rows={3}
+                    rows={field.rows || 3}
                     value={textValue(field.key)}
                     onChange={(e) => setValue(field.key, e.target.value)}
                     className={`${inputClass} resize-none`}
@@ -442,6 +511,211 @@ function DatabasePanel({ onChanged, setError, setNotice, bootstrap = false }) {
 
 /* -------------------------------------------------------------- 概览面板 */
 
+/* ------------------------------------------------------------ 数据看板 */
+
+/** 极简柱状图：不引入图表库，用 div 高度实现，够用且零依赖 */
+function MiniBarChart({ title, series, unit = "" }) {
+  const max = Math.max(1, ...series.map((item) => item.count));
+  const first = series[0]?.date?.slice(5) || "";
+  const last = series[series.length - 1]?.date?.slice(5) || "";
+
+  return (
+    <div>
+      <div className="flex items-end justify-between mb-2">
+        <h3 className="text-xs font-bold text-slate-700">{title}</h3>
+        <span className="text-xs text-slate-400">峰值 {max}{unit}</span>
+      </div>
+      <div className="flex items-end gap-1 h-24">
+        {series.map((item) => {
+          const height = Math.max(2, Math.round((item.count / max) * 100));
+          return (
+            <div
+              key={item.date}
+              className="flex-1 h-full flex flex-col items-center justify-end"
+              title={`${item.date}：${item.count}${unit}`}
+            >
+              <div
+                className="w-full bg-[#8fb3c7] rounded-t transition-all"
+                style={{ height: `${height}%` }}
+              />
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex justify-between text-xs text-slate-400 mt-1">
+        <span>{first}</span>
+        <span>{last}</span>
+      </div>
+    </div>
+  );
+}
+
+const DASHBOARD_DAYS = [7, 14, 30];
+
+function DashboardPanel() {
+  const [days, setDays] = useState(7);
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setError("");
+      const result = await api(`/api/admin/dashboard?days=${days}`);
+      setData(result);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [days]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (error) {
+    return (
+      <section className={cardClass}>
+        <p className="text-sm text-red-600">统计数据读取失败：{error}</p>
+      </section>
+    );
+  }
+  if (!data) {
+    return (
+      <section className={cardClass}>
+        <Alert kind="info">正在统计数据...</Alert>
+      </section>
+    );
+  }
+
+  const cards = [
+    {
+      label: "用户总数",
+      value: data.totals.users,
+      sub: `今日新增 +${data.today.newUsers}`,
+    },
+    {
+      label: "对话总数",
+      value: data.totals.conversations,
+      sub: `近 ${data.days} 天活跃 ${data.activeUsers} 人`,
+    },
+    {
+      label: "消息总数",
+      value: data.totals.messages,
+      sub: `今日新增 +${data.today.newMessages}`,
+    },
+    {
+      label: "日记总数",
+      value: data.totals.diaries,
+      sub: `今日新增 +${data.today.newDiaries}`,
+    },
+  ];
+
+  const moodTotal = data.moodDistribution.reduce((sum, item) => sum + item.count, 0);
+
+  return (
+    <section className={cardClass}>
+      <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+        <h2 className="text-sm font-bold text-slate-800">数据看板</h2>
+        <div className="flex items-center gap-2">
+          {DASHBOARD_DAYS.map((item) => (
+            <button
+              key={item}
+              type="button"
+              className={`px-2 py-1 text-xs rounded border transition-colors ${
+                days === item
+                  ? "border-[#8fb3c7] bg-[#e8eff2] text-slate-800 font-medium"
+                  : "border-[#d5d9d7] text-slate-500 hover:bg-[#f2f5f4]"
+              }`}
+              onClick={() => setDays(item)}
+            >
+              近 {item} 天
+            </button>
+          ))}
+          <button type="button" className={btnBase} onClick={load} disabled={loading}>
+            {loading ? "刷新中" : "刷新"}
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+        {cards.map((card) => (
+          <div key={card.label} className="border border-[#e6e8e6] rounded-lg p-3">
+            <div className="text-xs text-slate-500">{card.label}</div>
+            <div className="text-2xl font-bold text-slate-800 my-1">{card.value}</div>
+            <div className="text-xs text-slate-400">{card.sub}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="border border-[#e6e8e6] rounded-lg p-3">
+          <MiniBarChart title="消息量趋势" series={data.messageTrend} unit=" 条" />
+        </div>
+        <div className="border border-[#e6e8e6] rounded-lg p-3">
+          <MiniBarChart title="新增用户趋势" series={data.userTrend} unit=" 人" />
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="border border-[#e6e8e6] rounded-lg p-3">
+          <h3 className="text-xs font-bold text-slate-700 mb-2">
+            日记情绪分布（近 {data.days} 天）
+          </h3>
+          {moodTotal === 0 ? (
+            <p className="text-xs text-slate-400">这段时间还没有带标签的日记</p>
+          ) : (
+            <ul className="space-y-2">
+              {data.moodDistribution.map((item) => (
+                <li key={item.mood} className="text-xs">
+                  <div className="flex justify-between text-slate-600 mb-1">
+                    <span>{item.mood}</span>
+                    <span className="text-slate-400">{item.count} 篇</span>
+                  </div>
+                  <div className="h-2 bg-[#eef1ef] rounded overflow-hidden">
+                    <div
+                      className="h-full bg-[#a8c4d4]"
+                      style={{ width: `${Math.round((item.count / moodTotal) * 100)}%` }}
+                    />
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+          <p className="text-xs text-slate-400 mt-2">
+            仅作整体观察用，不做个体评判
+          </p>
+        </div>
+
+        <div className="border border-[#e6e8e6] rounded-lg p-3">
+          <h3 className="text-xs font-bold text-slate-700 mb-2">
+            活跃用户 Top 5（近 {data.days} 天，邮箱已掩码）
+          </h3>
+          {data.topUsers.length === 0 ? (
+            <p className="text-xs text-slate-400">这段时间还没有活跃用户</p>
+          ) : (
+            <ol className="space-y-2 text-xs text-slate-600">
+              {data.topUsers.map((item, index) => (
+                <li key={item.id} className="flex justify-between gap-2">
+                  <span className="truncate">
+                    <span className="text-slate-400 mr-1">{index + 1}.</span>
+                    {item.username || item.email}
+                  </span>
+                  <span className="text-slate-400 shrink-0">{item.messageCount} 条</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* ---------------------------------------------------------------- 概览页 */
+
 function OverviewPanel({ overview, onReload }) {
   if (!overview) {
     return (
@@ -489,6 +763,8 @@ function OverviewPanel({ overview, onReload }) {
       {readiness.site?.adminNotice ? (
         <Alert kind="info">{readiness.site.adminNotice}</Alert>
       ) : null}
+
+      <DashboardPanel />
 
       <section className={cardClass}>
         <div className="flex items-center justify-between mb-3">
@@ -1977,7 +2253,7 @@ export default function AdminPage() {
           <SettingsGroup
             group="tts"
             title="语音 TTS"
-            description="按 OpenAI 兼容格式请求 {baseUrl}/audio/speech，返回音频二进制。"
+            description="支持两种协议，按你的服务商选对应的「接口类型」：① OpenAI 兼容（智谱、OpenAI、多数厂商）→ POST {接口地址}/audio/speech，接口直接返回音频文件；② 小米 MiMo → POST {接口地址}/chat/completions，音频以 base64 形式放在 JSON 里返回。选错类型会报 400 / Invalid request。"
             settings={settings}
             setError={setError}
             setNotice={setNotice}

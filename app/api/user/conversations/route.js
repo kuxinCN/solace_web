@@ -1,9 +1,10 @@
 /**
  * 聊天会话：列表 / 新建 / 改名 / 置顶 / 删除。
  * 所有 SQL 都带 user_id 条件——这是替代 Supabase RLS 的关键。
- * 列表按「置顶优先 + 新建时间倒序」返回。
+ * 列表按「置顶优先 + 最后一条消息时间倒序」返回（MySQL DESC 时 NULL 自动排最后）。
  */
 import { describeDbError, execute, query } from "@/lib/db";
+import { ensureUserColumnsOnce } from "@/lib/schema";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody, toMysqlDateTime } from "@/lib/util";
 
@@ -22,11 +23,14 @@ export async function GET(request) {
   if (!user) return jsonError("请先登录", 401);
 
   try {
+    // 老部署升级时自动补列（pinned / pinned_at / last_message_at），避免 Unknown column
+    await ensureUserColumnsOnce();
+
     const conversations = await query(
-      `SELECT id, user_id, title, pinned, pinned_at, created_at
+      `SELECT id, user_id, title, pinned, pinned_at, created_at, last_message_at
          FROM conversations
         WHERE user_id = ?
-        ORDER BY pinned DESC, id DESC`,
+        ORDER BY pinned DESC, last_message_at DESC, id DESC`,
       [user.id]
     );
     return json({ ok: true, conversations });
@@ -43,10 +47,12 @@ export async function POST(request) {
   const title = cleanString(body.title, 120) || "新对话";
 
   try {
-    const result = await execute("INSERT INTO conversations (user_id, title) VALUES (?, ?)", [
-      user.id,
-      title,
-    ]);
+    // 新建即把活动时间初始化为当前时间（列表排序/日期显示统一用该字段）
+    const now = toMysqlDateTime(new Date());
+    const result = await execute(
+      "INSERT INTO conversations (user_id, title, last_message_at) VALUES (?, ?, ?)",
+      [user.id, title, now]
+    );
     return json({
       ok: true,
       conversation: {
@@ -55,7 +61,8 @@ export async function POST(request) {
         title,
         pinned: 0,
         pinned_at: null,
-        created_at: toMysqlDateTime(new Date()),
+        created_at: now,
+        last_message_at: now,
       },
     });
   } catch (err) {

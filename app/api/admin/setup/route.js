@@ -18,6 +18,7 @@ import {
   verifyTotp,
 } from "@/lib/admin-auth";
 import { getPublicDatabaseConfig } from "@/lib/db";
+import { rateLimit } from "@/lib/rate-limit";
 import { getGroup } from "@/lib/settings";
 import { buildCookie, cleanString, clientIp, json, jsonError, readJsonBody, safeEqualText } from "@/lib/util";
 
@@ -91,6 +92,15 @@ export async function GET(request) {
 }
 
 export async function POST(request) {
+  // 初始化入口是公开的，按 IP 限流，避免被人拿来爆破初始化口令
+  const quota = rateLimit(`admin-setup:${clientIp(request) || "direct"}`, {
+    limit: 10,
+    windowMs: 10 * 60 * 1000,
+  });
+  if (!quota.ok) {
+    return jsonError(`操作太频繁，请 ${quota.retryAfterSeconds} 秒后再试`, 429);
+  }
+
   const state = await getBootstrapState();
   if (!state.dbReady) {
     return jsonError(`数据库还连不上，请先完成数据库配置：${state.error}`, 503);

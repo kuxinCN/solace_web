@@ -4,6 +4,7 @@
  * 前端会引导他用新邮箱重新登录（与原前端的体验一致）。
  */
 import { describeDbError, execute } from "@/lib/db";
+import { rateLimit } from "@/lib/rate-limit";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
 
@@ -15,6 +16,15 @@ const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 export async function PUT(request) {
   const user = await getCurrentUser(request);
   if (!user) return jsonError("请先登录", 401);
+
+  // 换邮箱会清掉全部会话，属于敏感操作，按用户限流
+  const quota = rateLimit(`change-email:${user.id}`, {
+    limit: 5,
+    windowMs: 60 * 60 * 1000,
+  });
+  if (!quota.ok) {
+    return jsonError(`操作太频繁，请 ${quota.retryAfterSeconds} 秒后再试`, 429);
+  }
 
   const body = await readJsonBody(request);
   const email = cleanString(body.email, 190).toLowerCase();
