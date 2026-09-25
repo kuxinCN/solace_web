@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import ContentReviewPanel from "@/components/ContentReviewPanel";
+import DiaryTaskPanel from "@/components/DiaryTaskPanel";
 
 /* ------------------------------------------------------------------ 样式 */
 
@@ -126,6 +127,12 @@ const FIELDS = {
   ],
   safety: [
     {
+      type: "section",
+      key: "_secContent",
+      label: "① 内容安全过滤",
+      hint: "拦截真正危险的内容（自伤 / 伤害他人 / 违法）—— 只拦这三类，不是敏感词过滤",
+    },
+    {
       key: "enabled",
       label: "启用内容安全过滤",
       type: "boolean",
@@ -152,6 +159,132 @@ const FIELDS = {
       rows: 4,
       hint: "一行一个词。内置规则始终生效，这里只做补充。",
     },
+
+    /* ---------------- 压力评估 ---------------- */
+
+    {
+      type: "section",
+      key: "_secStress",
+      label: "② 压力评估与放松提醒",
+      hint: "读用户的整体状态（聊天 + 日记双通道），压力偏高时在右上角温和地问一句「要不要放松」",
+    },
+    {
+      key: "stressEnabled",
+      label: "启用压力评估与放松提醒",
+      type: "boolean",
+      full: true,
+      hint: "⚠️ 默认关闭。开启后：每 10 条消息（或命中关键词）做一次 AI 深度识别，压力连续偏高时弹出提醒卡。大部分判断由本地词表完成，Token 消耗很低",
+    },
+    {
+      key: "stressThreshold",
+      label: "提醒阈值（0-100）",
+      type: "number",
+      hint: "默认 70。用户自己还能在「压力设置」里再调；⚠️ 用户每次点「先不用」会自动 +5（最高 90）",
+    },
+    {
+      key: "stressTimeoutSeconds",
+      label: "深度识别超时（秒）",
+      type: "number",
+      hint: "默认 20。超时就放弃这次识别、继续用本地分数（不会阻塞用户）",
+    },
+
+    {
+      type: "section",
+      key: "_secLevels",
+      label: "③ 压力值 → 情绪档位",
+      hint: "⚠️ 这一段是**用户能看到的措辞**：提醒卡里会写「读到 78 分 · 压力很高」。语气要贴陪伴产品的调性，别写成诊断",
+    },
+    { key: "level1Max", label: "第 1 档 · 上限", type: "number", hint: "默认 40" },
+    { key: "level1Label", label: "第 1 档 · 情绪名", type: "text", hint: "默认「很放松」" },
+    { key: "level1Hint", label: "第 1 档 · 说明", type: "text", hint: "默认「读起来你现在挺稳的」" },
+    { key: "level2Max", label: "第 2 档 · 上限", type: "number", hint: "默认 65" },
+    { key: "level2Label", label: "第 2 档 · 情绪名", type: "text", hint: "默认「有点累」" },
+    { key: "level2Hint", label: "第 2 档 · 说明", type: "text", hint: "默认「能感觉到一些疲惫」" },
+    { key: "level3Max", label: "第 3 档 · 上限", type: "number", hint: "默认 85" },
+    { key: "level3Label", label: "第 3 档 · 情绪名", type: "text", hint: "默认「压力偏高」" },
+    { key: "level3Hint", label: "第 3 档 · 说明", type: "text", hint: "默认「这份沉有点压着你了」" },
+    {
+      key: "level4Label",
+      label: "第 4 档 · 情绪名（最高档）",
+      type: "text",
+      hint: "默认「压力很高」。最高档不用填上限，它就是 100",
+    },
+    { key: "level4Hint", label: "第 4 档 · 说明", type: "text", hint: "默认「你现在背的东西很重」" },
+
+    {
+      type: "section",
+      key: "_secRelax",
+      label: "④ 提醒卡里提供哪些放松方式",
+      hint: "⚠️ 只影响提醒卡。「治愈小屋」里两种方式永远都在，不受这里影响",
+    },
+    {
+      key: "relaxOfferBreathing",
+      label: "提供「呼吸放松」",
+      type: "boolean",
+      hint: "跟着圆圈做 4-2-4 呼吸，共 3 分钟",
+    },
+    {
+      key: "relaxOfferButterfly",
+      label: "提供「蝴蝶拍」",
+      type: "boolean",
+      hint: "双手交替轻拍，安抚自己",
+    },
+
+    {
+      type: "section",
+      key: "_secTrigger",
+      label: "⑤ 触发与花费控制",
+      hint: "绝大多数消息由本地词表处理（0 Token），只有这些条件命中时才真的调 AI",
+    },
+    {
+      key: "stressPeriodicInterval",
+      label: "每多少条消息做一次深度识别",
+      type: "number",
+      hint: "默认 10。这个值越大越省钱，但发现得也越晚",
+    },
+    {
+      key: "stressKeywordCooldownMinutes",
+      label: "关键词触发冷却（分钟）",
+      type: "number",
+      hint: "默认 2。避免同一段话里反复触发",
+    },
+    {
+      key: "stressChatCooldownMinutes",
+      label: "聊天提醒冷却（分钟）",
+      type: "number",
+      hint: "默认 15。两次提醒之间至少隔这么久",
+    },
+    {
+      key: "stressDiaryCooldownMinutes",
+      label: "日记提醒冷却（分钟）",
+      type: "number",
+      hint: "默认 30。日记场景更宽松，因为写完日记本来就需要缓一缓",
+    },
+    {
+      key: "stressDailyLlmLimit",
+      label: "每人每天最多调多少次 AI",
+      type: "number",
+      hint: "默认 60。防止长聊用户把额度跑飞",
+    },
+
+    {
+      type: "section",
+      key: "_secPrompt",
+      label: "⑥ 深度识别提示词",
+      hint: "⚠️ 接口地址 / API Key / 模型名都在「对话 AI」页配，这里只管提示词。要求模型只输出一行 JSON",
+    },
+    {
+      key: "stressPromptChat",
+      label: "聊天场景提示词",
+      type: "textarea",
+      rows: 8,
+    },
+    {
+      key: "stressPromptDiary",
+      label: "日记场景提示词",
+      type: "textarea",
+      rows: 8,
+    },
   ],
   tts: [
     { key: "enabled", label: "启用语音合成", type: "boolean" },
@@ -177,7 +310,19 @@ const FIELDS = {
       key: "voice",
       label: "默认音色",
       type: "text",
-      hint: "小米 MiMo：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 / Mia / Chloe / Milo / Dean ；OpenAI：alloy 等",
+      hint: "用户还没选 AI 人格时用这个。小米 MiMo：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 / Mia / Chloe / Milo / Dean ；OpenAI：alloy 等",
+    },
+    {
+      key: "voiceFemale",
+      label: "女性人格音色",
+      type: "text",
+      hint: "用户在「我的 → 设置」选了 AI 人格「她」之后，朗读用这个音色 —— 不然给女性人设配个男声会很出戏。留空则回退到「默认音色」。小米 MiMo 常见女声：冰糖 / 茉莉 / Mia / Chloe",
+    },
+    {
+      key: "voiceMale",
+      label: "男性人格音色",
+      type: "text",
+      hint: "用户选了 AI 人格「他」之后用这个。留空则回退到「默认音色」。小米 MiMo 常见男声：苏打 / 白桦 / Milo / Dean",
     },
     { key: "speed", label: "语速（0.5-2）", type: "number", step: "0.1", hint: "仅 OpenAI 兼容接口支持，小米 MiMo 接口会忽略它" },
     { key: "format", label: "音频格式", type: "text", hint: "常用 mp3 ；小米 MiMo 支持 wav / mp3 / pcm" },
@@ -310,6 +455,8 @@ const FIELDS = {
       rows: 16,
       hint: '发给审核 AI 的系统提示词。必须要求它只输出 JSON：{"verdict":"pass|reject","reason":"理由"}。⚠️ AI 返回读不懂时会标成「失败·待人工」，不会自动放过',
     },
+    // ⚠️ 日记打标 / 生成的配置**已经搬到后台「日记」页**了（这个页面只管内容审核）。
+    //    这里不再放日记相关的字段，免得两处都能改、互相打架。
     {
       key: "customBlocklist",
       label: "自定义违禁词（本地预检）",
@@ -324,6 +471,79 @@ const FIELDS = {
     { key: "defaultChatBackground", label: "默认聊天背景", type: "image" },
     { key: "defaultDiaryBackground", label: "默认「我的」页背景", type: "image" },
   ],
+  diary: [
+    {
+      type: "section",
+      key: "_secMood",
+      label: "① 情绪打标",
+      hint: "给用户写的日记打情绪标签（不改动正文，只是多一个标签）",
+    },
+    {
+      key: "moodEnabled",
+      label: "启用日记情绪打标",
+      type: "boolean",
+      hint: "关掉后不再给日记打情绪标签（已有的标签会保留）",
+    },
+    {
+      key: "moodPrompt",
+      label: "打标提示词",
+      type: "textarea",
+      rows: 10,
+      hint: "给日记打情绪标签用的系统提示词。要求它只输出一个词即可；代码会拿 8 个情绪词做白名单匹配，挑不出来就落到「默认标签」。⚠️ 打标和内容审核**共用同一套批量 AI 配置**（接口地址 / 批量地址 / Key / 模型名都在「数据审核」页配置）",
+    },
+    {
+      key: "defaultMood",
+      label: "默认情绪标签",
+      type: "text",
+      hint: "AI 打标失败、或它给不出有效词时用这个。默认「说不清」",
+    },
+    {
+      type: "section",
+      key: "_secGenerate",
+      label: "② AI 自动生成日记",
+      hint: "根据用户当天的聊天记录，替 ta 写一篇日记（会明确标注「AI 生成」）",
+    },
+    {
+      key: "generateEnabled",
+      label: "启用「AI 根据聊天记录自动生成日记」",
+      type: "boolean",
+      // ⚠️ full：这个开关是这一组的"总闸"，**必须独占一整行** ——
+      //    和「默认情绪标签」挤在同一行的话，看起来像打标的一个子选项。
+      full: true,
+      hint: "⚠️ 默认关闭。开启后系统每天会在下面设定的时间，为「昨天」有聊天记录的用户生成一篇日记；生成结果会明确标注「AI 生成」，用户可以自己删",
+    },
+    {
+      key: "generateHour",
+      label: "每天几点生成（0-23）",
+      type: "number",
+      hint: "默认 23 点：等这一天聊完再写。生成的是**前一天**的日记",
+    },
+    {
+      key: "minMessages",
+      label: "少于多少条消息就不生成",
+      type: "number",
+      hint: "默认 4 条。聊得太少，硬凑出来的日记反而显得敷衍",
+    },
+    {
+      key: "maxMessages",
+      label: "最多取多少条聊天消息",
+      type: "number",
+      hint: "默认 120 条，取最近的那些",
+    },
+    {
+      key: "maxChars",
+      label: "聊天记录最长多少字",
+      type: "number",
+      hint: "默认 6000 字，超出会从**末尾**截（保留最近的，那儿的情绪最完整）",
+    },
+    {
+      key: "generatePrompt",
+      label: "生成日记提示词",
+      type: "textarea",
+      rows: 16,
+      hint: "发给 AI 的生成指令。⚠️ 里面规定了输出格式（标签 / 标题 / 正文 三个行首标记），**改格式的话代码里的解析也要跟着改**（lib/content-review.js 的 parseDiaryDraft）",
+    },
+  ],
 };
 
 const TABS = [
@@ -331,8 +551,11 @@ const TABS = [
   { id: "database", label: "数据库" },
   { id: "ai", label: "对话 AI" },
   { id: "tts", label: "语音 TTS" },
-  { id: "safety", label: "内容安全" },
+  // ⚠️ 这一页现在管两件事：内容安全（别人能看到的内容）+ 压力评估（用户自己的状态），
+  //    所以名字也改了 —— 原来的「内容安全」已经盖不住它。
+  { id: "safety", label: "内容安全与压力" },
   { id: "review", label: "数据审核" },
+  { id: "diary", label: "日记" },
   { id: "music", label: "背景音乐" },
   { id: "mail", label: "邮箱 / 验证码" },
   { id: "users", label: "用户管理" },
@@ -343,9 +566,9 @@ const TABS = [
 
 /* ------------------------------------------------------------ 基础 UI 块 */
 
-function Field({ label, hint, children }) {
+function Field({ label, hint, className = "", children }) {
   return (
-    <label className="block mb-3">
+    <label className={`block mb-3 ${className}`}>
       <span className="block text-xs font-medium text-slate-600 mb-1">{label}</span>
       {children}
       {hint ? <span className="block text-xs text-slate-400 mt-1">{hint}</span> : null}
@@ -640,9 +863,29 @@ function SettingsGroup({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
         {fields.map((field) => {
+          // ⚠️ field.full = 这一项**独占一整行**。
+          //    默认是两列并排，但"总开关"和它下面的参数挤在同一行会让层级看不出来 ——
+          //    该占整行的就标 full。典型例子：「AI 根据聊天记录自动生成日记」。
+          const spanCls = field.full ? "md:col-span-2" : "";
+
+          // 分节标题：把同一个 tab 里的几组配置**分框**
+          if (field.type === "section") {
+            return (
+              <div
+                key={field.key}
+                className="md:col-span-2 mt-2 border-t border-[#eceeec] pt-3 first:mt-0 first:border-t-0 first:pt-0"
+              >
+                <p className="text-sm font-semibold text-slate-700">{field.label}</p>
+                {field.hint ? (
+                  <p className="mt-0.5 text-xs text-slate-400">{field.hint}</p>
+                ) : null}
+              </div>
+            );
+          }
+
           if (field.type === "boolean") {
             return (
-              <Field key={field.key} label={field.label} hint={field.hint}>
+              <Field key={field.key} label={field.label} hint={field.hint} className={spanCls}>
                 <span className="inline-flex items-center gap-2 h-[34px]">
                   <input
                     type="checkbox"
@@ -3011,6 +3254,8 @@ export default function AdminPage() {
   const [reviewModelsBusy, setReviewModelsBusy] = useState(false);
   const [reviewTestBusy, setReviewTestBusy] = useState(false);
   const [reviewTestResult, setReviewTestResult] = useState(null);
+  // 「日记」页：手动排「生成今日日记任务」时的忙碌态
+  const [diaryGenBusy, setDiaryGenBusy] = useState(false);
 
   /**
    * 拉取审核 AI 的可用模型。
@@ -3461,6 +3706,62 @@ export default function AdminPage() {
             </SettingsGroup>
 
             <ContentReviewPanel api={api} setError={setError} setNotice={setNotice} />
+          </>
+        ) : null}
+
+        {tab === "diary" ? (
+          <>
+            <SettingsGroup
+              group="diary"
+              title="日记 · 情绪打标与 AI 生成"
+              description="打标和「数据审核」共用同一套批量 AI 配置（接口地址 / 批量地址 / Key / 模型名都在「数据审核」页配），这里只管日记自己的提示词和开关。改完记得先点右上角「保存」。"
+              settings={settings}
+              setError={setError}
+              setNotice={setNotice}
+              onSaved={loadAll}
+            >
+              <div className="border-t border-[#eceeec] pt-3 mt-1">
+                {/* ⚠️ 这里只放"手动排任务"这一个按钮 ——
+                    其余动作（提交 / 拉取 / 看原文）都在下面的任务面板里 */}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={btnBase}
+                    disabled={diaryGenBusy}
+                    onClick={async () => {
+                      setDiaryGenBusy(true);
+                      setError("");
+                      setNotice("");
+                      try {
+                        const result = await api("/api/admin/review", {
+                          method: "POST",
+                          body: { action: "generateDiaries" },
+                        });
+                        setNotice(
+                          result?.message ||
+                            `已为昨天排入 ${result?.created || 0} 篇待生成的日记`
+                        );
+                      } catch (err) {
+                        setError("生成任务失败：" + err.message);
+                      } finally {
+                        setDiaryGenBusy(false);
+                      }
+                    }}
+                    title="不用等定时器，立刻为「昨天」排一批生成任务；排完在下面点「立即提交」就能送出去"
+                  >
+                    {diaryGenBusy ? "处理中…" : "① 立刻为昨天排生成任务"}
+                  </button>
+                  <span className="text-xs text-slate-400">
+                    平时由定时器每天自动跑，这里用于调试 / 补跑
+                  </span>
+                </div>
+              </div>
+
+              {/* ---- 任务列表：打标和生成**分开列** ---- */}
+              <div className="border-t border-[#eceeec] pt-3 mt-1">
+                <DiaryTaskPanel api={api} setError={setError} setNotice={setNotice} />
+              </div>
+            </SettingsGroup>
           </>
         ) : null}
 

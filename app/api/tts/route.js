@@ -5,6 +5,7 @@
  * 配置来自后台「TTS」页面。需要用户端已登录。
  */
 import { requestSpeech, prewarmConnections } from "@/lib/ai";
+import { getGroup } from "@/lib/settings";
 import { rateLimit } from "@/lib/rate-limit";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, clientIp, jsonError, stripEmoji } from "@/lib/util";
@@ -41,9 +42,30 @@ export async function POST(request) {
   }
 
   const text = cleanString(payload.text, 1000);
-  const voice = cleanString(payload.voice, 64);
+  let voice = cleanString(payload.voice, 64);
 
   if (!text) return jsonError("要合成的文字不能为空", 400);
+
+  // ⚠️ 音色跟着 AI 人格走：
+  //
+  //    前端可以不传 voice（或传 "auto"），由后端根据用户选的「她 / 他」挑音色 ——
+  //    后台配了「女性音色 / 男性音色」就用对应那个，没配就回退到「默认音色」。
+  //    这样"换个 AI 人格，声音也跟着换"，前端不用跟着改。
+  if (!voice || voice === "auto") {
+    try {
+      const config = await getGroup("tts");
+      const persona = String(user.aiPersona || "").trim().toLowerCase();
+      const byPersona =
+        persona === "female"
+          ? config?.voiceFemale
+          : persona === "male"
+            ? config?.voiceMale
+            : "";
+      voice = String(byPersona || config?.voice || "").trim();
+    } catch {
+      /* 读配置失败就不指定音色，让上游用它自己的默认值 */
+    }
+  }
 
   // TTS 专用副本：移除 emoji（😊 会被 MiMo 读成“笑脸”），不改动前端的原始数据。
   // 纯 emoji 内容净化后为空，直接返回，避免白调一次上游。

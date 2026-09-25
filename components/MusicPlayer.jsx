@@ -61,6 +61,11 @@ export default function MusicPlayer() {
   // 音源选「网易云收藏」时先确认用户这边能不能访问 music.163.com：
   // 访问不了就把界面降级成本地歌单，避免浮窗里一片空白、用户以为坏了。
   // 这个行为可以在后台关掉（autoFallback = false）。
+  //
+  // ⚠️ 这里曾经写过「手机浏览器直接当作访问不了」—— **那是错的，已经撤掉**。
+  //    当时的假设是"网易云外链播放器在手机上用不了"，但实测反例很明确：
+  //    手机上访问别的带网易云的网站是能正常播放的。
+  //    所以不要凭猜测降级 —— 只在**确实探测不通**时才降级（下面的逻辑）。
   useEffect(() => {
     if (data?.music?.source !== "netease") return;
     if (data?.music?.autoFallback === false) return;
@@ -268,8 +273,20 @@ export default function MusicPlayer() {
         >
           <span className={playing ? "animate-pulse" : ""}>♪</span>
         </button>
-      ) : (
-        <div className="w-80 rounded-2xl bg-white/95 backdrop-blur shadow-xl border border-[#e6e8e6] overflow-hidden">
+      ) : null}
+
+      {/* ⚠️ 面板**始终挂载**，收起时只是用 CSS 挪出可视区，而不是卸载它。
+          原因：网易云是 iframe —— 一旦被卸载，用户在它里面点的播放就断了，
+          表现就是"一收起浮窗，网易云的歌就停了"。
+          挪走之后 iframe 还活着，播放能继续。 */}
+      <div
+        className={
+          expanded
+            ? "w-80 rounded-2xl bg-white/95 backdrop-blur shadow-xl border border-[#e6e8e6] overflow-hidden"
+            : "pointer-events-none absolute -left-[9999px] top-0 w-80 opacity-0"
+        }
+        aria-hidden={!expanded}
+      >
           {/* 头部：标题 + 收起 */}
           <div className="flex items-center justify-between px-3 py-2 border-b border-[#f0f2f0]">
             <span className="text-xs font-medium text-slate-600">
@@ -277,8 +294,11 @@ export default function MusicPlayer() {
             </span>
             <div className="flex items-center gap-2">
               {fellBack ? (
-                <span className="text-[10px] text-amber-600" title="检测到当前网络访问不了网易云，已自动切回本地歌单">
-                  已降级为本地
+                <span
+                  className="text-[10px] text-amber-600"
+                  title="已自动切到本地歌单 —— 因为探测到当前网络访问不了网易云（music.163.com）。如果你能正常打开网易云，可以在后台把「网易云访问不了时自动降级」关掉"
+                >
+                  已切到本地
                 </span>
               ) : null}
               {autoNetease ? (
@@ -318,11 +338,27 @@ export default function MusicPlayer() {
                     const height = isPlaylist ? 430 : 86;
                     return (
                       <div key={item.id}>
-                        <p className="text-xs text-slate-600 mb-1 truncate">
+                        {/* 歌名做成链接：手机上点击会唤起网易云 App，
+                            万一播放器在某个环境下不好用，也有条保底路径 */}
+                        <a
+                          href={
+                            isPlaylist
+                              ? `https://music.163.com/playlist?id=${encodeURIComponent(
+                                  item.neteaseId
+                                )}`
+                              : `https://music.163.com/song?id=${encodeURIComponent(
+                                  item.neteaseId
+                                )}`
+                          }
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block text-xs text-slate-600 mb-1 truncate hover:text-[#5b8aa6] hover:underline"
+                          title="在网易云里打开（手机上会唤起 App）"
+                        >
                           {isPlaylist ? "🎵 " : ""}
                           {item.title}
                           {item.artist ? ` · ${item.artist}` : ""}
-                        </p>
+                        </a>
                         <iframe
                           title={item.title}
                           frameBorder="0"
@@ -448,18 +484,21 @@ export default function MusicPlayer() {
               <button
                 type="button"
                 onClick={() => {
-                  pause();
-                  localStorage.setItem("solace_music_on", "0");
+                  // ⚠️ 这个按钮以前会 pause() —— 用户点「关闭」的本意往往只是
+                  //    "把窗口收起来"，结果音乐也跟着停了（网易云的 iframe 还会被卸载）。
+                  //    现在改成**只收起窗口，继续播放**。
+                  //    真要停音乐：点上方的暂停按钮，或者把音量拖到 0。
                   setExpanded(false);
+                  setListOpen(false);
                 }}
                 className="w-full mt-2 text-[11px] text-slate-400 hover:text-slate-600 py-1 transition-colors"
+                title="只是收起浮窗，音乐继续播放"
               >
-                关闭背景音乐
+                收起浮窗（音乐继续）
               </button>
             </div>
           )}
         </div>
-      )}
     </div>
   );
 }

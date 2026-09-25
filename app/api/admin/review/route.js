@@ -17,6 +17,7 @@
 import { getAdminFromRequest, logAudit } from "@/lib/admin-auth";
 import {
   applyManualVerdict,
+  createDailyDiaryTasks,
   pollBatches,
   scanExistingContent,
   submitPendingTasks,
@@ -130,15 +131,38 @@ export async function GET(request) {
 
   try {
     const statRows = await query(
-      `SELECT status, COUNT(*) AS n FROM content_review_tasks GROUP BY status`
+      `SELECT task_kind, status, COUNT(*) AS n
+         FROM content_review_tasks
+        GROUP BY task_kind, status`
     );
+
+    // payload.stats 保持"全部任务"的口径（兼容老前端），
+    // 另外按任务类型分开给一份 —— 后台「日记」页要单独看打标 / 生成的数量。
+    const byKind = { review: {}, diary_mood: {}, diary_generate: {} };
+
     for (const row of statRows) {
-      const key = String(row.status || "");
-      if (Object.prototype.hasOwnProperty.call(payload.stats, key)) {
-        payload.stats[key] = Number(row.n) || 0;
+      const kind = String(row.task_kind || "review");
+      const status = String(row.status || "");
+      const count = Number(row.n) || 0;
+
+      if (Object.prototype.hasOwnProperty.call(payload.stats, status)) {
+        payload.stats[status] += count;
+      }
+      if (byKind[kind] && Object.prototype.hasOwnProperty.call(byKind[kind], status)) {
+        byKind[kind][status] = count;
+      } else if (byKind[kind]) {
+        byKind[kind][status] = count;
       }
     }
-    // 「待人工」= 审核失败 + 还没被 AI 处理的图片（关了审图时）
+
+    // 保证每个类型都有完整的键（前端不用做 undefined 判断）
+    for (const kind of Object.keys(byKind)) {
+      for (const status of ["pending", "submitted", "pass", "reject", "failed", "manual"]) {
+        if (!byKind[kind][status]) byKind[kind][status] = 0;
+      }
+    }
+
+    payload.statsByKind = byKind;
     payload.stats.manual = Number(payload.stats.failed) || 0;
   } catch (err) {
     payload.warn = `${payload.warn} ${err?.code || err?.message || err}`.trim();
@@ -187,7 +211,7 @@ export async function GET(request) {
   try {
     // ⚠️ 列表里**不带 content**：图片是 base64，一次几十条会有好几 MB
     const tasks = await query(
-      `SELECT t.id, t.user_id, t.field, t.is_image, t.status, t.reason,
+      `SELECT t.id, t.user_id, t.task_kind, t.target_id, t.field, t.is_image, t.status, t.reason,
               t.provider, t.submitted_at, t.reviewed_at, t.created_at,
               u.username, u.email
          FROM content_review_tasks t
@@ -198,6 +222,9 @@ export async function GET(request) {
     payload.tasks = tasks.map((row) => ({
       id: row.id,
       userId: row.user_id,
+      // ⚠️ 后端「日记」页靠这个字段分流（review / diary_mood / diary_generate）
+      taskKind: row.task_kind || "review",
+      targetId: row.target_id || null,
       field: row.field || "",
       isImage: Number(row.is_image) === 1,
       status: row.status || "",
@@ -274,6 +301,20 @@ export async function POST(request) {
       username: admin.username,
       action: "review_scan",
       detail: result.message || `扫描完成，新入队 ${result.queued || 0} 条`,
+      ip: clientIp(request),
+    });
+    return json(result);
+  }
+
+  /* ---- 手动触发：为昨天排「生成日记」任务 ---- */
+  if (action === "generateDiaries") {
+    // 平时是定时器每天自动跑一次；这里留个手动入口，方便调试或补跑
+    const result = await createDailyDiaryTasks();
+    await logAudit({
+      adminId: admin.adminId,
+      username: admin.username,
+      action: "diary_generate",
+      detail: result.message || `排入 ${result.created || 0} 篇`,
       ip: clientIp(request),
     });
     return json(result);
@@ -466,6 +507,31 @@ export async function POST(request) {
     }
     if (!apiKey) return jsonError("请先填「API Key」", 400);
 
+    /* ⓪ 先检查 Key 的类型 —— 这一条能省掉后面所有无效尝试 */
+    //
+    // 小米有两种 API Key：
+    //   `sk-` 开头 → 按量计费（从现金余额扣费）✅ 批量能用
+    //   `tp-` 开头 → Token Plan 套餐的 Key ⚠️ **批量不能用**
+    //
+    // 官方文档在批量那页明确写了「批量推理不支持 Token Plan 抵扣」。
+    // 拿 tp- 的 Key 调批量接口，创建任务时会直接 500 internal_error，
+    // 而且报错里完全看不出是这个原因 —— 所以这里提前拦一下。
+    if (/^tp-/i.test(apiKey)) {
+      return json({
+        ok: false,
+        verdict: "token-plan-key",
+        hint:
+          "❌ 你的 API Key 是 `tp-` 开头的，这是 **Token Plan 套餐的 Key**。\n\n" +
+          "官方文档明确写了：**批量推理不支持 Token Plan 抵扣，只从现金余额扣费**。\n" +
+          "所以用这个 Key 调批量接口，创建任务必然失败，而且上游只回一句 internal_error —— " +
+          "这就是你一直看到 500 的原因。\n\n" +
+          "**解决办法（二选一）**：\n" +
+          "① 去小米控制台的「API Keys」页面，申请一个 **`sk-` 开头**的按量计费 Key，" +
+          "填到上面的「API Key」里（注意按量计费要有余额，批量是从余额扣的）；\n" +
+          "② 或者把「审核方式」改成「逐条调用」—— 那条路不受这个限制。",
+      });
+    }
+
     const steps = [];
 
     /* ① 浅探测：查一个不存在的批次 */
@@ -501,14 +567,20 @@ export async function POST(request) {
 
     /* ② 深探测：上传一条极简请求，然后创建批次 */
     try {
+      // ⚠️ 完全照**官方模板**写（只有 model + messages，不带 max_tokens / temperature）：
+      //
+      //   {"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions",
+      //    "body": {"model": "mimo-v2.6-flash", "messages": [{"role": "user", "content": "Hello"}]}}
+      //
+      //   小米控制台的手动提交页写着「系统将逐条校验，校验通过的成员可继续发送；
+      //   失败数据需修正后重新上传」—— 既然上游有校验环节，照模板写最保险。
       const line = JSON.stringify({
         custom_id: "solace-probe",
         method: "POST",
         url: "/v1/chat/completions",
         body: {
           model,
-          messages: [{ role: "user", content: "hi" }],
-          max_tokens: 8,
+          messages: [{ role: "user", content: "Hello" }],
         },
       });
 
@@ -530,6 +602,10 @@ export async function POST(request) {
         step: "② 上传测试文件",
         status: upRes.status,
         raw: upText.slice(0, 300),
+        // 把**发出去的 JSONL 原文**也带上：可以直接贴到小米控制台的
+        // 「批量推理 → 手动提交」页面做校验 —— 那是官方给的验证途径，
+        // 能直接看出是不是格式问题（页面上写着「系统将逐条校验」）。
+        jsonl: line,
       });
 
       if (!upRes.ok) {
@@ -558,32 +634,124 @@ export async function POST(request) {
         });
       }
 
-      const bcRes = await fetch(endpoint(batchBase, "/batches"), {
-        method: "POST",
-        headers: authHeaders(batchBase, apiKey),
-        body: JSON.stringify({
-          input_file_id: fileId,
-          endpoint: "/v1/chat/completions",
-          completion_window: "24h",
-        }),
-        signal: timeoutSignal(20000),
-      });
-      const bcText = await bcRes.text();
-      steps.push({
-        step: "③ 创建测试批次（1 条纯文本请求）",
-        status: bcRes.status,
-        raw: bcText.slice(0, 400),
-      });
+      /* ③ 创建批次：**试几种参数组合**，看哪种能过 */
+      //
+      // 为什么要试多种：上游失败时只回一句 internal_error，
+      // 光看那句话分不清是"参数写法不对"还是"账号没权限"。
+      // 把几种常见写法都试一遍，能过的就说明是写法问题，全不能过就基本是账号问题。
+      const attempts = [
+        {
+          // ⚠️ 这个字段是从上游**真实返回**里发现的，官方文档的 curl 示例里没有它：
+          //    控制台建的任务在批次列表里带着 "name":"test"（就是页面上的「任务描述」）。
+          //    很可能它是必填的 —— 不传时上游直接 500 internal_error。
+          name: "带 name 字段（对应控制台的「任务描述」）← 最可能的正确写法",
+          body: {
+            input_file_id: fileId,
+            endpoint: "/v1/chat/completions",
+            completion_window: "24h",
+            name: "solace-probe",
+          },
+        },
+        {
+          name: "标准写法（双认证头 + endpoint 带 /v1 + window=24h）",
+          body: {
+            input_file_id: fileId,
+            endpoint: "/v1/chat/completions",
+            completion_window: "24h",
+          },
+        },
+        {
+          // ⚠️ 我们平时会**同时发** `api-key` 和 `Authorization` 两个头
+          //    （因为小米的对话文档用前者、批量文档用后者）。
+          //    文档里批量接口的示例只用了 Authorization ——
+          //    有些网关对"多余的认证头"比较敏感，所以这里单独用 Bearer 试一次。
+          name: "只发 Authorization 头（去掉 api-key）",
+          body: {
+            input_file_id: fileId,
+            endpoint: "/v1/chat/completions",
+            completion_window: "24h",
+          },
+          onlyBearer: true,
+        },
+        {
+          name: "endpoint 不带 /v1",
+          body: {
+            input_file_id: fileId,
+            endpoint: "chat/completions",
+            completion_window: "24h",
+          },
+        },
+        {
+          name: "省略 completion_window（用上游默认值）",
+          body: { input_file_id: fileId, endpoint: "/v1/chat/completions" },
+        },
+      ];
 
-      if (bcRes.ok) {
+      let lastStatus = 0;
+      let lastRaw = "";
+      let success = null;
+
+      for (const attempt of attempts) {
+        // 「只发 Bearer」的组合要单独构造请求头
+        const attemptHeaders = attempt.onlyBearer
+          ? { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` }
+          : authHeaders(batchBase, apiKey);
+
+        const bcRes = await fetch(endpoint(batchBase, "/batches"), {
+          method: "POST",
+          headers: attemptHeaders,
+          body: JSON.stringify(attempt.body),
+          signal: timeoutSignal(20000),
+        });
+        const bcText = await bcRes.text();
+        lastStatus = bcRes.status;
+        lastRaw = bcText;
+
+        steps.push({
+          step: `③ 创建批次 — ${attempt.name}`,
+          status: bcRes.status,
+          raw: bcText.slice(0, 300),
+        });
+
+        if (bcRes.ok) {
+          success = attempt;
+          break;
+        }
+
+        // 鉴权类错误再试别的写法也没用，直接停
+        if (bcRes.status === 401 || bcRes.status === 403) break;
+      }
+
+      /* ④ 顺便探一下「列批次」接口 —— 判断批次服务对**这个账号**是否可用 */
+      //
+      // 这一步能把问题再分一层：
+      //   列批次也 500     → 整个批次服务对你不工作（账号 / 开通问题）
+      //   列批次正常返回    → 服务在工作，只是"创建"这一步有问题
+      //   （这个接口文档没写，能返回就说明网关认它）
+      try {
+        const listRes = await fetch(endpoint(batchBase, "/batches"), {
+          headers: authHeaders(batchBase, apiKey, false),
+          signal: timeoutSignal(15000),
+        });
+        steps.push({
+          step: "④ 列出已有批次（判断批次服务对本账号是否可用）",
+          status: listRes.status,
+          raw: (await listRes.text()).slice(0, 300),
+        });
+      } catch (err) {
+        steps.push({ step: "④ 列出已有批次", error: err?.message || String(err) });
+      }
+
+      if (success) {
         return json({
           ok: true,
           verdict: "ok",
           steps,
+          batchBaseUrl: batchBase,
           hint:
-            "✅ 整条链路都通了（上传 + 创建批次）。" +
-            "如果正式提交还是失败，那就不是接口的问题，而是**批次内容**的问题 —— " +
-            "最常见的是批次里混了图片（多模态消息体），程序现在已经自动把图片排除在批量之外了",
+            `✅ 整条链路都通了 —— 能过的是这个写法：「${success.name}」。\n` +
+            "请把这个结果告诉我，我把代码里的参数改成这一种；" +
+            "在此之前正式提交可能会因为写法不一致而失败",
         });
       }
 
@@ -591,10 +759,21 @@ export async function POST(request) {
         ok: false,
         verdict: "create",
         steps,
+        batchBaseUrl: batchBase,
         hint:
-          "创建批次失败（上游只回了一句 internal_error，看不出细节）。" +
-          "请把上面的原文发出来。" +
-          "如果上传那步是 200，说明地址和 Key 都对，问题出在创建参数或账号权限上",
+          `四种参数组合都是 HTTP ${lastStatus} —— 这基本**排除了「参数写法」和「认证头」的问题**。\n` +
+          `当前用的批量地址：${batchBase}\n` +
+          `已上传的文件 id：${fileId}\n\n` +
+          "剩下只有**账号在这个服务上的状态**了。请按顺序做这两件事：\n" +
+          "**① 去控制台「批量推理」页面手动建一次任务**（最关键）：\n" +
+          "   随便传个小文件 → 如果**它也建不了**，那就 100% 是账号 / 开通问题，" +
+          "页面通常会有提示（比如要开通、要签协议、要充值）；\n" +
+          "   如果**它建成功了** → 把那个页面显示的 Base URL 和提交参数发我，我照着改。\n" +
+          "**② 顺手点一下上面第 ④ 步的结果**：\n" +
+          "   列批次也 500 → 整个批次服务对你不工作；\n" +
+          "   列批次正常 → 服务在工作，只有「创建」这一步不行。\n\n" +
+          "⚠️ 在批量修好之前，建议先把「审核方式」切成「逐条调用」—— " +
+          "探活和上传都通，说明 Key 和地址没问题，逐条那条路是能用的。",
       });
     } catch (err) {
       steps.push({ step: "②/③ 异常", error: err?.message || String(err) });

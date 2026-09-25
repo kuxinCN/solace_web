@@ -161,8 +161,20 @@ export default function ContentReviewPanel({ api, setError, setNotice }) {
           );
         }
       } else if (action === "poll") {
+        // ⚠️ 把每个批次的结果也带上。
+        //    以前只显示"检查了 N 个、完成 0 个" —— 查询失败时（比如地址填错）
+        //    完全看不出来，只能看到"一直进行中"，非常难排查。
+        const lines = (result.detail || []).map((item) => {
+          if (item.error) return `${item.batchId}：❌ ${item.error}`;
+          if (item.passCount !== undefined) {
+            return `${item.batchId}：✅ 通过 ${item.passCount} / 违规 ${item.rejectCount} / 失败 ${item.failedCount}`;
+          }
+          return `${item.batchId}：${item.status || "未知"}`;
+        });
+
         setNotice(
-          `检查了 ${result.checked || 0} 个批次，完成 ${result.completed || 0} 个`
+          `检查了 ${result.checked || 0} 个批次，完成 ${result.completed || 0} 个` +
+            (lines.length ? ` —— ${lines.join("；")}` : "")
         );
       } else {
         // 其它动作（扫描存量数据等）：直接用后端给的说明文案
@@ -327,9 +339,18 @@ export default function ContentReviewPanel({ api, setError, setNotice }) {
             {Array.isArray(batchTest.steps) && batchTest.steps.length ? (
               <div className="mt-1.5 space-y-1 border-t border-black/5 pt-1.5">
                 {batchTest.steps.map((item, index) => (
-                  <p key={index} className="break-all text-slate-500">
-                    {item.step}：{item.status ?? ""} {item.raw || item.error || ""}
-                  </p>
+                  <div key={index} className="break-all text-slate-500">
+                    <p>
+                      {item.step}：{item.status ?? ""} {item.raw || item.error || ""}
+                    </p>
+                    {item.jsonl ? (
+                      <p className="mt-0.5 rounded bg-[#f5f6f5] px-2 py-1 text-[10px] text-slate-500">
+                        我们上传的 JSONL 原文（可以贴到小米控制台「手动提交」页做校验）：
+                        <br />
+                        {item.jsonl}
+                      </p>
+                    ) : null}
+                  </div>
                 ))}
               </div>
             ) : null}

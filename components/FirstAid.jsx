@@ -259,10 +259,18 @@ function ButterflyAnimation({ onClose }) {
   );
 }
 
-export default function FirstAid() {
+export default function FirstAid({ initialMethod = "", allowedIds = null }) {
   const [activeId, setActiveId] = useState("");
   const [breathing, setBreathing] = useState(false);
   const [butterfly, setButterfly] = useState(false);
+
+  // ⚠️ 这两个 prop 是给**压力弹窗**用的：它要"直接进某个方式"，
+  //    而且只开放后台勾选的那几种。
+  //    不传时行为**和以前完全一样** —— 「治愈小屋」里三种方式常驻，用户自己点。
+  useEffect(() => {
+    if (initialMethod === "breathing") setBreathing(true);
+    if (initialMethod === "butterfly") setButterfly(true);
+  }, [initialMethod]);
 
   const handleClick = (id) => {
     if (id === "breath") {

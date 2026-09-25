@@ -266,6 +266,29 @@ async function handleChat(request) {
     });
   }
 
+  // ---- 压力评估（本地规则，几毫秒）----
+  //
+  // ⚠️ **故意不 await**：这一段要查几次库，触发时还会异步调一次 LLM，
+  //    压在用户消息的响应链路上会白白多等几百毫秒 —— 而它本来就不影响回复内容。
+  //    算出来的分数和"要不要弹窗"由前端调 `/api/stress/state` 取（那里有 pendingPopup）。
+  // ⚠️ 用**动态 import**：这样没开这个功能时，聊天热路径完全不加载这套模块。
+  void (async () => {
+    try {
+      const [trigger, settings] = await Promise.all([
+        import("@/lib/stress-trigger"),
+        import("@/lib/settings"),
+      ]);
+
+      const stressConfig = await settings.getGroup("safety");
+      if (!stressConfig?.stressEnabled) return;
+
+      await trigger.onUserMessage(user.id, lastUserMessage?.content || "");
+    } catch (err) {
+      // 压力评估出任何问题都不该影响聊天
+      console.warn("[stress] 聊天压力分析失败：", err?.message || err);
+    }
+  })();
+
   // ---------------- 非流式：直接返回完整回复 ----------------
   if (!wantStream) {
     const startedAt = Date.now();

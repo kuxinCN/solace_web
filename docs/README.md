@@ -6,15 +6,18 @@
 
 | 文档 | 什么时候看 | 内容 |
 |---|---|---|
-| [API.md](./API.md) | 对接接口、排查接口报错 | 全部 45 个端点的说明、认证方式、状态码、限流一览、数据库表结构 |
-| [INCIDENTS.md](./INCIDENTS.md) | 遇到"以前出过的问题"、复盘 | 已发生的故障记录（现象 / 根因 / 修复 / 预防） |
+| [API.md](./API.md) | 对接接口、排查接口报错 | 全部端点的说明、认证方式、状态码、限流一览、数据库表结构 |
+| [INCIDENTS.md](./INCIDENTS.md) | 遇到"以前出过的问题"、复盘 | **10 条**已发生的故障记录（现象 / 根因 / 修复 / 预防）—— 含 4 条部署期事故 + 6 条功能期事故 |
 | [MUSIC.md](./MUSIC.md) | 改音乐功能、配网易云 | 三种音源、网易云官方播放器参数、能力边界、自动降级、备份迁移 |
-| [CONTENT-REVIEW.md](./CONTENT-REVIEW.md) | 配数据审核 / 排查审核不生效 | 用户资料异步审核（小米 MiMo 批量推理）、打标与处置、默认值配置、定时任务、常见问题 |
+| [CONTENT-REVIEW.md](./CONTENT-REVIEW.md) | 配数据审核 / 排查审核不生效 | 用户资料异步审核（小米 MiMo 批量推理）、**日记情绪打标**、**AI 生成日记**、违规处置、默认值配置、定时任务、常见问题 |
+| [STRESS-DESIGN.md](./STRESS-DESIGN.md) | 改压力评估 / 答辩要讲算法 | **完整技术方案 + 落地修订对照**：词库 / 本地打分 / EMA 平滑 / 双通道融合 / 四层漏斗 / 触发与弹窗条件 / 危机干预 |
+| [STRESS-SPEC.md](./STRESS-SPEC.md) | 快速查压力评估的参数 | 精简规格：词库分档、打分公式、触发与弹窗条件、情绪档位表、三张表结构 |
+| [STRESS-AGENT-PROMPT.md](./STRESS-AGENT-PROMPT.md) | 追溯原始需求 | 当初交给 Agent 的交付提示词（**原始版，未修订**） |
 | [PERFORMANCE.md](./PERFORMANCE.md) | 觉得卡 / 要调优 / 答辩要讲性能 | 全站体检实测数据、慢查询根因与修法、PM2 内存坑、安全建议、明确不用做的事 |
 | [OPTIMIZATION-TODO.md](./OPTIMIZATION-TODO.md) | 想继续优化但不知道做什么 | 还没做的 18 项优化，按 P0-P3 分级，每项含具体命令、预期收益、风险 |
 | [PET-ART-SPEC.md](./PET-ART-SPEC.md) | 画师 / 组员要画桌宠 | 桌宠美术交付规格（画布 / 图层拆分 / 尺寸 / 命名 / 动画参数 / 配色 / 验收）—— **可直接发给画师** |
 | [PET-DESIGN.md](./PET-DESIGN.md) | 要做虚拟宠物时 | 桌宠完整方案（定位 / 红线 / 功能清单 / 后端 / 前端 / **算力评估** / **性能优化** / **美术需求**）—— 已设计未实现 |
-| [DEV-HISTORY.md](./DEV-HISTORY.md) | 写技术报告 / 开发历程随笔 | 项目从 0 到 1 的关键节点、踩过的坑、可展开的写作角度 |
+| [DEV-HISTORY.md](./DEV-HISTORY.md) | 写技术报告 / 开发历程随笔 | **11 个阶段**（技术选型 → 后端搭建 → 上线踩坑 → 工程加固 → 前后端融合 → 协作流程 → 背景音乐 → 内容审核 → 日记体系 → 性能 → 压力评估），末尾附 **12 个可展开的文章角度** |
 | [OPERATIONS.md](./OPERATIONS.md) | 部署完成后、日常维护 | 数据库备份与恢复、pm2 日志轮转、健康检查、巡检清单、故障速查、改代码标准流程 |
 | [DEPLOY-CHECKLIST.md](./DEPLOY-CHECKLIST.md) | 每次发版 | 要上传哪些文件、打包/上传/构建命令、验证清单、回滚方法、前端对接说明 |
 
@@ -33,7 +36,9 @@
 | 压测、看性能数据 | [OPERATIONS.md](./OPERATIONS.md) → 六；脚本在 `scripts/bench.sh` |
 | 了解整体功能、架构、安全设计 | [../README.md](../README.md) |
 | 配背景音乐 / 加网易云歌曲 | [MUSIC.md](./MUSIC.md) |
-| 配数据审核 / 用户内容要不要审 | [CONTENT-REVIEW.md](./CONTENT-REVIEW.md) |
+| 配数据审核 / 日记打标 / AI 生成日记 | [CONTENT-REVIEW.md](./CONTENT-REVIEW.md) |
+| 改压力评估算法 / 讲它的设计 | [STRESS-DESIGN.md](./STRESS-DESIGN.md) |
+| 查压力评估的阈值、档位、触发参数 | [STRESS-SPEC.md](./STRESS-SPEC.md) |
 | 觉得网站卡 / 要讲性能优化 | [PERFORMANCE.md](./PERFORMANCE.md) |
 | 想继续优化，不知道做什么 | [OPTIMIZATION-TODO.md](./OPTIMIZATION-TODO.md) |
 | 要给画师提桌宠需求 | [PET-ART-SPEC.md](./PET-ART-SPEC.md) |

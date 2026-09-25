@@ -7,12 +7,15 @@ import ProfileView from "@/components/ProfileView";
 import TrashModal from "@/components/TrashModal";
 import DeleteChoiceModal from "@/components/DeleteChoiceModal";
 import { readMessageCache, removeMessageCache, writeMessageCache } from "@/lib/message-cache";
+import MoodPicker, { MoodBadge } from "@/components/MoodPicker";
 import BioModal from "@/components/BioModal";
 import AboutModal from "@/components/AboutModal";
 import FavoritesModal from "@/components/FavoritesModal";
 import MemoriesModal from "@/components/MemoriesModal";
 import ImageCropper from "@/components/ImageCropper";
 import WelcomeOverlay from "@/components/WelcomeOverlay";
+import StressMeter from "@/components/StressMeter";
+import RelaxPopup from "@/components/RelaxPopup";
 import { useAvatarUpload, currentImageWriteSeq, markLocalImageWrite, mergeLocalImageWrites } from "@/lib/use-avatar-upload";
 
 // 统一的数据请求封装：所有后端 REST 调用都走这里
@@ -861,12 +864,40 @@ export default function Chat() {
   // 日记相关状态
   const [diaryTitle, setDiaryTitle] = useState("");
   const [diaryContent, setDiaryContent] = useState("");
+  // 用户自己选的情绪标签（可选）。和 AI 打的标签分开存、也分开显示。
+  const [diaryMood, setDiaryMood] = useState("");
   const [savingDiary, setSavingDiary] = useState(false);
   const [diaries, setDiaries] = useState([]);
   const [diaryView, setDiaryView] = useState(null); // 当前查看的日记对象
   const [diaryEdit, setDiaryEdit] = useState(false); // 详情是否处于编辑态
   const [diaryEditTitle, setDiaryEditTitle] = useState("");
   const [diaryEditContent, setDiaryEditContent] = useState("");
+  const [diaryEditMood, setDiaryEditMood] = useState("");
+
+  // 压力提醒弹窗（右上角那张卡）。null = 不显示。
+  // ⚠️ 它可能来自三个地方：聊天后拉状态、日记保存后的响应、页面加载时复查。
+  const [stressPopup, setStressPopup] = useState(null);
+
+  /**
+   * 回应用户对压力提醒的操作（现在做 / 先不用 / 不再提醒）。
+   *
+   * ⚠️ 用户说"不用"时，**后端会把阈值 +5**（最高 90）——
+   *    所以这里的"关掉"不只是视觉上消失，系统真的会变得更含蓄。
+   */
+  const respondStressPopup = async (payload) => {
+    try {
+      const result = await apiRequest("/api/stress/popup-response", {
+        method: "POST",
+        body: payload,
+      });
+      // 接受的话让弹层留在原地（RelaxPopup 自己会切到放松界面）
+      if (payload?.action !== "accept") setStressPopup(null);
+      return result || {};
+    } catch {
+      setStressPopup(null);
+      return {};
+    }
+  };
   // 小屏日记页：点击「＋ 写日记」后右栏显示新建表单（桌面默认右栏即新建表单）
   const [diaryCreating, setDiaryCreating] = useState(false);
   // 日记多选模式（交互参考对话列表）
@@ -1949,6 +1980,7 @@ export default function Chat() {
       user_id: user.id,
       title,
       content,
+      user_mood: diaryMood || null,
       is_pinned: 0,
       is_favorited: 0,
       created_at: new Date().toISOString(),
@@ -1956,29 +1988,50 @@ export default function Chat() {
     setDiaries((prev) => [optimistic, ...prev]);
     setDiaryTitle("");
     setDiaryContent("");
+    setDiaryMood("");
     showHint("正在保存…");
     try {
       const res = await apiRequest("/api/user/diaries", {
         method: "POST",
-        body: { title, content },
+        body: { title, content, userMood: diaryMood || undefined },
       });
       const diary = res.diary;
       if (!diary) throw new Error("保存日记失败");
       setDiaries((prev) => prev.map((d) => (d.id === tempId ? { ...d, ...diary } : d)));
       setDiaryCreating(false);
-      // 后台悄悄生成情绪标签，不阻塞保存（几秒后列表里就会出现标签）
-      requestDiaryMood(diary.id);
+
+      // ⚠️ 这里**不再**调 requestDiaryMood（那是旧的"逐条调用"打标）。
+      //    现在走「日记打标队列」：后端在保存时已经把它排进队列，
+      //    由**批量 AI** 统一打标（和数据审核共用同一套配置，五折价）。
+      //    AI 的标签会在后台轮询跑到之后写进 diaries.mood，刷新就能看到。
+      //    用户自己选的标签存在 user_mood，和 AI 的分开、互不覆盖。
+
+      // ---- 压力评估：写完日记是最需要被接住的时刻 ----
+      //
+      // ⚠️ 分数是后端在保存时就算好的（在响应的 stress 字段里），
+      //    这里**故意延迟十来秒**再弹：刚写完立刻弹会打断那段余韵，
+      //    等一会儿反而更像"读完了、想了一下才开口"。
+      // ⚠️ 用 `current || popup` —— 万一这段时间已经有别的弹窗了，不覆盖它。
+      if (res.stress?.shouldPopup && res.stress.popup) {
+        const popup = res.stress.popup;
+        const delay = Number(res.stress.delaySeconds ?? 12) * 1000;
+        window.setTimeout(() => {
+          setStressPopup((current) => current || popup);
+        }, Math.max(0, delay));
+      }
+
       if (andSend) {
         // 先提示，再进入 AI 阅读流程（内部会切到聊天 tab 并流式输出）
         showHint("已保存并发送给 AI");
         await readDiaryFlow(diary, true);
       } else {
-        showHint("日记已保存");
+        showHint("日记已保存（AI 的情绪标签稍后补上）");
       }
     } catch (err) {
       setDiaries((prev) => prev.filter((d) => d.id !== tempId));
       setDiaryTitle(title);
       setDiaryContent(content);
+      setDiaryMood(optimistic.user_mood || "");
       showHint("保存日记失败：" + err.message);
     } finally {
       setSavingDiary(false);
@@ -2099,25 +2152,43 @@ export default function Chat() {
       return;
     }
     const oldDiary = { ...diaryView };
-    const updated = { ...diaryView, title, content };
+    const updated = {
+      ...diaryView,
+      title,
+      content,
+      user_mood: diaryEditMood || null,
+    };
     setDiaryView(updated);
-    setDiaries((prev) =>
-      prev.map((d) => (d.id === diaryView.id ? updated : d))
-    );
+    setDiaries((prev) => prev.map((d) => (d.id === diaryView.id ? updated : d)));
     setSavingDiary(true);
     showHint("正在更新…");
     try {
       await apiRequest("/api/user/diaries", {
         method: "PATCH",
-        body: { id: diaryView.id, title, content },
+        body: {
+          id: diaryView.id,
+          title,
+          content,
+          userMood: diaryEditMood || "",
+        },
       });
       setDiaryEdit(false);
-      showHint("日记已更新");
+
+      // ⚠️ 正文改了 → 后端已经把 AI 的旧标签清掉、并**重新排进打标队列**。
+      //    所以本地也要把那枚「AI · xxx」清掉，否则会显示一个已经不成立的旧标签。
+      //    ⚠️ 只清 AI 的（mood），用户自己选的 user_mood 保留 —— 那是他的选择。
+      if (content !== oldDiary.content) {
+        setDiaryView((prev) => (prev ? { ...prev, mood: null } : prev));
+        setDiaries((prev) =>
+          prev.map((d) => (d.id === oldDiary.id ? { ...d, mood: null } : d))
+        );
+        showHint("日记已更新（AI 标签会重新打一次）");
+      } else {
+        showHint("日记已更新");
+      }
     } catch (err) {
       setDiaryView(oldDiary);
-      setDiaries((prev) =>
-        prev.map((d) => (d.id === oldDiary.id ? oldDiary : d))
-      );
+      setDiaries((prev) => prev.map((d) => (d.id === oldDiary.id ? oldDiary : d)));
       showHint("更新失败：" + err.message);
     } finally {
       setSavingDiary(false);
@@ -4178,6 +4249,15 @@ export default function Chat() {
                         rows={10}
                         className={`${inputClass} mb-3 resize-none`}
                       />
+
+                      {/* 情绪标签（可选）：一行 8 个，从「有点沉」到「轻快」。
+                          ⚠️ 只是让你在固定位置找到相近的词，**不是打分** ——
+                             不选也完全没问题；写完 AI 还会自己读一遍，
+                             那个标签在详情里会标成「AI ·」以示区分。 */}
+                      <div className="mb-3">
+                        <p className="text-xs text-slate-400 mb-1.5">今天的心情（可跳过）</p>
+                        <MoodPicker value={diaryMood} onChange={setDiaryMood} />
+                      </div>
                       <div className="grid grid-cols-2 gap-2">
                         <button
                           onClick={() => handleSaveDiary(false)}
@@ -4214,6 +4294,10 @@ export default function Chat() {
                         rows={10}
                         className={`${inputClass} mb-3 resize-none`}
                       />
+                      <div className="mb-3">
+                        <p className="text-xs text-slate-400 mb-1.5">心情标签</p>
+                        <MoodPicker value={diaryEditMood} onChange={setDiaryEditMood} />
+                      </div>
                       <div className="flex gap-2">
                         <button
                           onClick={handleSaveEditDiary}
@@ -4233,12 +4317,43 @@ export default function Chat() {
                   ) : diaryView ? (
                     /* 详情态：完整标题、日期、正文 */
                     <div>
+                      {/* ⚠️ 日期以 **diary_date** 为准（它才是"这篇日记写的是哪一天"）。
+                          AI 生成时 created_at 是"生成那一刻"（今天 23 点），
+                          直接拿它显示的话，用户会以为这是今天的日记。 */}
                       <p className="text-xs text-slate-400 mb-1">
-                        {formatDateCN(diaryView.created_at)}
+                        {formatDateCN(diaryView.diary_date || diaryView.created_at)}
+                        {diaryView.source === "ai" ? (
+                          <span className="ml-1 text-slate-300">· 这天的聊天整理</span>
+                        ) : null}
                       </p>
-                      <h2 className="text-xl font-bold text-slate-800 mb-3">
-                        {diaryView.title}
-                      </h2>
+                      {/* 标题 + 情绪标签（放标题右侧）。
+                          ⚠️ 两个标签**都显示、并且分清来源**：
+                             「用户 ·」是写的时候自己选的，「AI ·」是 AI 读出来的 ——
+                             不区分的话用户会以为系统自相矛盾。 */}
+                      <div className="flex items-start justify-between gap-2 mb-3">
+                        <h2 className="text-xl font-bold text-slate-800 break-words">
+                          {diaryView.title}
+                        </h2>
+                        <div className="flex shrink-0 flex-wrap justify-end gap-1 pt-1">
+                          {/* ⚠️ AI 生成的日记要**明确标出来**：
+                              用户得知道这篇不是自己写的，否则会产生
+                              "我什么时候写过这个？"的困惑（甚至以为账号被盗）。
+                              徽章里带上具体日期 —— 光写"AI 生成"看不出对应哪天。 */}
+                          {diaryView.source === "ai" ? (
+                            <span
+                              className="rounded-full bg-[#f3f0f8] px-2 py-0.5 text-[11px] text-[#8a7aa8]"
+                              title="这篇是 AI 根据你那天和它聊的内容整理的"
+                            >
+                              AI 生成
+                              {diaryView.diary_date
+                                ? ` · ${String(diaryView.diary_date).slice(5).replace("-", "/")}`
+                                : ""}
+                            </span>
+                          ) : null}
+                          <MoodBadge mood={diaryView.user_mood} source="user" />
+                          <MoodBadge mood={diaryView.mood} source="ai" />
+                        </div>
+                      </div>
                       <div className="text-sm text-slate-700 leading-7 whitespace-pre-wrap break-words mb-4">
                         {diaryView.content}
                       </div>
@@ -4248,6 +4363,7 @@ export default function Chat() {
                             setDiaryEdit(true);
                             setDiaryEditTitle(diaryView.title || "");
                             setDiaryEditContent(diaryView.content || "");
+                            setDiaryEditMood(diaryView.user_mood || "");
                           }}
                           className={`${btnBase} px-3 py-1.5 text-sm`}
                         >
@@ -4647,6 +4763,20 @@ export default function Chat() {
         onClose={() => setMemoriesOpen(false)}
         onAdd={addMemory}
         onDelete={deleteMemory}
+      />
+
+      {/* ---- 压力评估：右上角的读数 + 提醒卡片 ----
+          ⚠️ 两个都挂在**最外层**，这样切 tab（聊天 / 日记 / 治愈小屋）时都在 ——
+             用户不会因为换个页面就"丢了"自己的状态，也不会在这里看过了、
+             到那边又被问一遍。
+          ⚠️ RelaxPopup 只负责"要不要做"；真正做放松还是走「治愈小屋」那套
+             组件（呼吸 / 蝴蝶拍），不重复实现。 */}
+      <StressMeter api={apiRequest} onPendingPopup={setStressPopup} />
+      <RelaxPopup
+        popup={stressPopup}
+        onRespond={respondStressPopup}
+        onDone={() => setStressPopup(null)}
+        api={apiRequest}
       />
 
       {/* 聊天背景裁剪弹窗：可在横屏 16:9 / 竖屏 9:16 间切换，默认横屏 */}
