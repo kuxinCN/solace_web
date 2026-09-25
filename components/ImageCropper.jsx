@@ -148,7 +148,7 @@ export default function ImageCropper({
 
   return (
     <div
-      className="fixed inset-0 z-[70] bg-black/50 flex items-stretch sm:items-center justify-center sm:px-4"
+      className="modal-fade fixed inset-0 z-[70] bg-black/50 flex items-stretch sm:items-center justify-center sm:px-4"
       onClick={() => !disabled && onCancel?.()}
     >
       <div
@@ -232,7 +232,7 @@ export default function ImageCropper({
             type="button"
             onClick={onCancel}
             disabled={disabled}
-            className="border border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 rounded-lg px-5 min-h-[44px] text-sm hover:bg-[#eef1f2] hover:text-slate-700 active:scale-[0.98] transition-all duration-150 disabled:opacity-50"
+            className="border border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 rounded-lg px-5 min-h-[44px] text-sm hover:bg-[#eef1f2] hover:text-slate-700 hover:scale-[1.02] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:hover:scale-100"
           >
             取消
           </button>

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import ContentReviewPanel from "@/components/ContentReviewPanel";
 
 /* ------------------------------------------------------------------ 样式 */
 
@@ -57,17 +58,37 @@ const FIELDS = {
       type: "secret",
       hint: "⚠️ 这里填的必须是「OpenAI 兼容协议」的 Key：智谱、DeepSeek、通义、Moonshot、OpenAI 官方等都支持。不是 OpenAI 协议的厂商（接口路径/请求体格式不同）直接填这里会报错",
     },
-    { key: "model", label: "模型名", type: "text", hint: "例如 glm-4-flash、deepseek-chat、gpt-4o-mini" },
+    {
+      key: "model",
+      label: "模型名",
+      type: "datalist",
+      optionsKey: "aiModels",
+      hint: "可以点下方「拉取可用模型」自动获取后选择，也可以直接手动输入。例：glm-4-flash、deepseek-chat、gpt-4o-mini",
+    },
     { key: "temperature", label: "温度（0-2）", type: "number", step: "0.1" },
     { key: "maxTokens", label: "最大回复长度", type: "number" },
     { key: "timeoutSeconds", label: "超时（秒）", type: "number" },
     { key: "provider", label: "服务商备注", type: "text", hint: "仅作记录，不影响调用" },
     {
       key: "systemPrompt",
-      label: "AI 提示词（人设）",
+      label: "AI 提示词（默认人设）",
       type: "textarea",
-      rows: 16,
-      hint: "AI 的角色设定与说话风格。保存后立即生效，不用重启服务。留空则使用前端自带的提示词。",
+      rows: 12,
+      hint: "用户还没选择人格时用这一份。保存后立即生效，不用重启服务。留空则使用前端自带的提示词。",
+    },
+    {
+      key: "systemPromptMale",
+      label: "AI 提示词（男性人格）",
+      type: "textarea",
+      rows: 12,
+      hint: "用户在「我的 → 设置」或聊天输入框旁选「他」时用这份。留空则回退到默认人设。",
+    },
+    {
+      key: "systemPromptFemale",
+      label: "AI 提示词（女性人格）",
+      type: "textarea",
+      rows: 12,
+      hint: "用户选「她」时用这份。留空则回退到默认人设。",
     },
     {
       key: "diaryPrompt",
@@ -75,6 +96,61 @@ const FIELDS = {
       type: "textarea",
       rows: 4,
       hint: "用户写完日记后，这段文字会和日记正文一起发给 AI。用 {diary} 表示日记正文的位置。",
+    },
+  ],
+  music: [
+    { key: "enabled", label: "启用背景音乐", type: "boolean", hint: "关闭后用户端不显示播放器" },
+    {
+      key: "source",
+      label: "当前音源",
+      type: "select",
+      options: [
+        { value: "local", label: "本地歌单（本地上传 + 外链直链，支持自动播放与切歌）" },
+        { value: "netease", label: "网易云收藏（官方外链播放器，不能自动播放/切歌）" },
+      ],
+      hint: "随时可在两者间切换；两种歌单可以同时维护，切过去即可生效",
+    },
+    {
+      key: "autoPlay",
+      label: "首次交互后自动播放",
+      type: "boolean",
+      hint: "浏览器禁止页面一加载就出声，所以实际行为是「用户第一次点击后」开始播",
+    },
+    { key: "defaultVolume", label: "默认音量（0-1）", type: "number", step: "0.1" },
+    {
+      key: "autoFallback",
+      label: "网易云访问不了时自动降级到本地歌单",
+      type: "boolean",
+      hint: "音源选「网易云收藏」时，前端会先探测用户能否访问 music.163.com；访问不了就自动切回本地歌单，避免浮窗一片空白",
+    },
+  ],
+  safety: [
+    {
+      key: "enabled",
+      label: "启用内容安全过滤",
+      type: "boolean",
+      hint: "关闭后所有内容都会原样发给 AI（不建议关闭）",
+    },
+    {
+      key: "extraSelfHarm",
+      label: "自伤倾向 · 自定义词",
+      type: "textarea",
+      rows: 5,
+      hint: "一行一个词，命中后返回温和承接 + 心理援助热线。以 # 开头的行当注释忽略。内置规则始终生效，这里只做补充。",
+    },
+    {
+      key: "extraViolence",
+      label: "伤害他人 · 自定义词",
+      type: "textarea",
+      rows: 4,
+      hint: "一行一个词。内置规则始终生效，这里只做补充。",
+    },
+    {
+      key: "extraIllegal",
+      label: "违法行为 · 自定义词",
+      type: "textarea",
+      rows: 4,
+      hint: "一行一个词。内置规则始终生效，这里只做补充。",
     },
   ],
   tts: [
@@ -136,6 +212,118 @@ const FIELDS = {
     { key: "siteName", label: "站点名称", type: "text" },
     { key: "adminNotice", label: "后台公告", type: "textarea", hint: "显示在概览页，可留空" },
   ],
+  review: [
+    {
+      key: "enabled",
+      label: "启用数据审核",
+      type: "boolean",
+      hint: "关闭后不再自动审核用户上传的头像 / 背景 / 昵称 / 签名（已经攒下的待审内容会留在队列里）",
+    },
+    { key: "provider", label: "服务商备注", type: "text", hint: "仅作记录，不影响调用" },
+    {
+      key: "baseUrl",
+      label: "接口地址（逐条 / 对话）",
+      type: "text",
+      hint: "小米 MiMo 填 https://api.xiaomimimo.com/v1。测试连接、拉取模型、逐条审核都走这个地址",
+    },
+    {
+      key: "batchBaseUrl",
+      label: "批量推理接口地址",
+      type: "text",
+      hint: "⚠️ 批量推理用独立域名，和上面那个不是一回事：形如 https://batch-api-{region}.xiaomimimo.com/v1，要去小米控制台的「批量推理」页面获取。留空则批量提交会失败并自动降级为逐条模式（功能正常，但拿不到五折价和闲时调度）",
+    },
+    {
+      key: "apiKey",
+      label: "API Key",
+      type: "secret",
+      hint: "要求和对话 AI 一样。程序会对小米域名同时发送 Authorization: Bearer 和 api-key 两个头（小米两处文档写法不同，两个都发最稳）",
+    },
+    {
+      key: "model",
+      label: "模型名",
+      type: "datalist",
+      optionsKey: "reviewModels",
+      hint: "例如 mimo-v2.6-flash；点右侧箭头看候选，也可以直接手输",
+    },
+    {
+      key: "mode",
+      label: "审核方式",
+      type: "select",
+      options: [
+        { value: "batch", label: "批量推理（一次提交一批，结果延迟返回，需要轮询领取）" },
+        { value: "inline", label: "逐条调用（立刻出结果，一条一条来）" },
+      ],
+      hint: "选批量推理时，如果上游接口和 OpenAI Batch 协议不一致导致提交失败，会自动降级为逐条（可在下面关掉）",
+    },
+    {
+      key: "completionWindow",
+      label: "最长等待时间",
+      type: "text",
+      hint: "⚠️ 实测结论：**接口只认 24h**。填 168h（7 天）这类值，服务端会直接返回 HTTP 500 internal_error —— 文档里「控制台可设 1-14 天」那句只对控制台页面有效。程序会自动退回 24h 重试，所以填错也不会挂，但**建议就保持 24h**",
+    },
+    {
+      key: "autoSubmit",
+      label: "自动定时提交",
+      type: "boolean",
+      hint: "开着的话，应用会自己按下面的间隔「收结果 + 交新任务」—— 你完全不用点「立即提交」（手动点还要等它跑完，界面会卡一会儿）。保存即生效，不用重启",
+    },
+    {
+      key: "submitIntervalMinutes",
+      label: "自动提交间隔（分钟，1-1440）",
+      type: "number",
+      hint: "默认 10 分钟。批量推理本身就是延迟返回的，间隔太短没意义；太长又会让违规内容多挂一会儿",
+    },
+    {
+      key: "autoFallback",
+      label: "批量不可用时自动降级为逐条",
+      type: "boolean",
+      hint: "建议开着：否则批量接口一旦不兼容，审核就完全停住了",
+    },
+    {
+      key: "reviewImages",
+      label: "连图片一起送审",
+      type: "boolean",
+      hint: "关掉后头像 / 背景完全不送 AI，只进后台人工队列（昵称和签名始终会送审）",
+    },
+    {
+      key: "imageHandling",
+      label: "图片任务怎么处理",
+      type: "select",
+      options: [
+        { value: "manual", label: "进后台人工队列（不花 AI 额度，推荐）" },
+        { value: "inline", label: "用「逐条调用」单独审（会花钱，但能自动处理）" },
+      ],
+      hint: "⚠️ 图片**不能进批量推理** —— 多模态消息体会让整个批次在创建阶段就失败（HTTP 500），一条图片就能拖垮整批。所以批量模式下图片只能二选一：走人工，或用逐条单独审。⚠️ 如果「审核方式」选的是「逐条调用」，这个设置不起作用（那时图片跟文本一起走逐条）",
+    },
+    { key: "maxItemsPerBatch", label: "每次最多提交条数（1-100）", type: "number" },
+    { key: "timeoutSeconds", label: "逐条模式超时（秒）", type: "number" },
+    {
+      key: "keepDays",
+      label: "审核记录保留天数",
+      type: "number",
+      hint: "超过这个天数的审核记录会被定时清理脚本删掉",
+    },
+    {
+      key: "reviewPrompt",
+      label: "审核提示词",
+      type: "textarea",
+      rows: 16,
+      hint: '发给审核 AI 的系统提示词。必须要求它只输出 JSON：{"verdict":"pass|reject","reason":"理由"}。⚠️ AI 返回读不懂时会标成「失败·待人工」，不会自动放过',
+    },
+    {
+      key: "customBlocklist",
+      label: "自定义违禁词（本地预检）",
+      type: "textarea",
+      rows: 5,
+      hint: "一行一个词，# 开头当注释。命中的内容**不走 AI、直接判违规并把资料改回默认值**。内置词表已经覆盖常见脏话的中文写法、谐音、拼音缩写（如草泥马 / tm / sb / 废物），这里只补充你遇到的漏网之词。⚠️ 只放没有歧义的词（像「滚」既可能骂人也可能是亲昵说法，别放）",
+    },
+    { key: "defaultNickname", label: "默认昵称", type: "text", hint: "昵称被判违规后改回这个" },
+    { key: "defaultBio", label: "默认签名", type: "text", hint: "留空 = 违规后清空签名" },
+    { key: "defaultAvatar", label: "默认头像", type: "image", hint: "留空则用前端自带的默认头像" },
+    { key: "defaultAiAvatar", label: "默认 AI 头像", type: "image" },
+    { key: "defaultChatBackground", label: "默认聊天背景", type: "image" },
+    { key: "defaultDiaryBackground", label: "默认「我的」页背景", type: "image" },
+  ],
 };
 
 const TABS = [
@@ -143,6 +331,9 @@ const TABS = [
   { id: "database", label: "数据库" },
   { id: "ai", label: "对话 AI" },
   { id: "tts", label: "语音 TTS" },
+  { id: "safety", label: "内容安全" },
+  { id: "review", label: "数据审核" },
+  { id: "music", label: "背景音乐" },
   { id: "mail", label: "邮箱 / 验证码" },
   { id: "users", label: "用户管理" },
   { id: "userdata", label: "用户数据" },
@@ -187,7 +378,189 @@ function StatusDot({ ok }) {
 
 /* -------------------------------------------------------- 通用配置表单块 */
 
-function SettingsGroup({ group, title, description, settings, onSaved, setError, setNotice, children }) {
+/** 默认值图片预览：只接受真正的位图 data URL（挡掉 svg 这类可能带脚本的类型） */
+function safeImagePreview(value) {
+  const text = String(value || "");
+  return /^data:image\/(png|jpe?g|gif|webp|bmp);base64,/i.test(text) ? text : "";
+}
+
+/**
+ * 把选的图片读成 data URL，并先缩到 maxSize 以内。
+ *
+ * 为什么必须缩：默认值会整段存进 settings 表，原图几 MB 会把它撑爆；
+ * 缩到 512px 之后 base64 一般只有几十 KB，和用户端上传的头像同一个量级。
+ */
+function readImageAsDataUrl(file, maxSize = 512) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("读取文件失败"));
+    reader.onload = () => {
+      const img = new Image();
+      img.onerror = () => reject(new Error("这不是有效的图片文件"));
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
+          const width = Math.max(1, Math.round(img.width * scale));
+          const height = Math.max(1, Math.round(img.height * scale));
+
+          const canvas = document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext("2d");
+          ctx.drawImage(img, 0, 0, width, height);
+
+          // 优先 WebP（同画质体积小约 30%），浏览器不支持时退回 JPEG
+          let out = canvas.toDataURL("image/webp", 0.85);
+          if (!out.startsWith("data:image/webp")) out = canvas.toDataURL("image/jpeg", 0.85);
+          resolve(out);
+        } catch (err) {
+          reject(new Error(err?.message || "处理图片失败"));
+        }
+      };
+      img.src = String(reader.result || "");
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
+/**
+ * 可输入 + 可下拉选择的输入框（用来替代原生 datalist）
+ *
+ * ⚠️ 为什么不用 `<input list>`：
+ *   原生 datalist 有个硬伤 —— **输入框里已经有内容时，点箭头只会拿当前值去筛选**，
+ *   匹配不到就是一片空白，用户会以为"没有可用模型"。
+ *   这里自己实现：点箭头**永远列出全部候选**，输入时才按关键字过滤。
+ *
+ * 右侧两个控件（只在模型名字段出现）：
+ *   [拉取模型] [▼]
+ *   箭头在拉取按钮的右边，用细线 SVG 画，不用原生那种粗糙的下拉箭头。
+ */
+function ComboField({
+  value,
+  onChange,
+  placeholder,
+  inputClass,
+  options = [],
+  onFetch,
+  fetching = false,
+}) {
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef(null);
+
+  // 点空白处收起
+  useEffect(() => {
+    if (!open) return;
+    const away = (event) => {
+      if (boxRef.current && !boxRef.current.contains(event.target)) setOpen(false);
+    };
+    document.addEventListener("mousedown", away);
+    return () => document.removeEventListener("mousedown", away);
+  }, [open]);
+
+  // 点箭头时列全部；输入之后按关键字过滤（大小写不敏感，匹配子串）
+  const keyword = String(value || "").trim().toLowerCase();
+  const list = keyword
+    ? options.filter((item) => String(item).toLowerCase().includes(keyword))
+    : options;
+
+  return (
+    <div className="relative" ref={boxRef}>
+      <input
+        type="text"
+        value={value}
+        placeholder={placeholder}
+        onChange={(event) => {
+          onChange(event.target.value);
+          if (!open && options.length) setOpen(true);
+        }}
+        onFocus={() => {
+          if (options.length) setOpen(true);
+        }}
+        className={`${inputClass} ${onFetch ? "pr-[124px]" : "pr-9"}`}
+      />
+
+      <div className="absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-1">
+        {onFetch ? (
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(true);
+              onFetch();
+            }}
+            disabled={fetching}
+            className="rounded-md border border-[#d5d9d7] bg-white px-2 py-0.5 text-[11px] text-slate-600 transition-colors hover:bg-[#f2f5f4] disabled:opacity-50"
+            title="从接口拉取可用模型列表"
+          >
+            {fetching ? "拉取中…" : "拉取模型"}
+          </button>
+        ) : null}
+
+        <button
+          type="button"
+          tabIndex={-1}
+          onClick={() => setOpen((prev) => !prev)}
+          disabled={!options.length}
+          className="flex h-6 w-6 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-[#f2f5f4] hover:text-slate-600 disabled:opacity-40"
+          title={options.length ? "展开候选列表" : "还没有候选，先点「拉取模型」"}
+        >
+          <svg
+            viewBox="0 0 12 12"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`}
+          >
+            <path d="M3 4.5L6 7.5L9 4.5" />
+          </svg>
+        </button>
+      </div>
+
+      {open && list.length ? (
+        <ul className="absolute left-0 right-0 z-30 mt-1 max-h-56 overflow-y-auto rounded-lg border border-[#e6e8e6] bg-white py-1 shadow-xl">
+          {list.slice(0, 200).map((item) => (
+            <li key={item}>
+              <button
+                type="button"
+                onClick={() => {
+                  onChange(item);
+                  setOpen(false);
+                }}
+                className={`block w-full truncate px-3 py-1.5 text-left text-xs transition-colors hover:bg-[#f2f5f4] ${
+                  String(item) === String(value) ? "bg-[#e8eff2] text-slate-800" : "text-slate-600"
+                }`}
+              >
+                {item}
+              </button>
+            </li>
+          ))}
+          {list.length < options.length ? (
+            <li className="px-3 py-1.5 text-[11px] text-slate-400">
+              共 {options.length} 个，已按输入过滤；清空输入可看全部
+            </li>
+          ) : null}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
+function SettingsGroup({
+  group,
+  title,
+  description,
+  settings,
+  onSaved,
+  setError,
+  setNotice,
+  // 动态候选项：形如 { aiModels: ["glm-4-flash", ...] }，给 type: "datalist" 的字段用
+  fieldOptions = {},
+  // 「拉取可用模型」按钮：只有模型名字段用得到，按钮内嵌在输入框右侧
+  onFetchModels,
+  modelsBusy = false,
+  children,
+}) {
   const fields = FIELDS[group] || [];
   const source = (settings && settings[group]) || {};
   const [draft, setDraft] = useState({});
@@ -285,6 +658,58 @@ function SettingsGroup({ group, title, description, settings, onSaved, setError,
             );
           }
 
+          // 默认值里的图片（头像 / 背景）：选一张 → 在浏览器里缩到 512px 并转成 data URL 存进配置。
+          // 为什么存 data URL 而不是上传成文件：默认值是「用户违规后回填」用的，
+          // 存成和用户上传完全相同的格式，处置时直接写库即可，少一次文件读写和清理。
+          if (field.type === "image") {
+            const preview = safeImagePreview(textValue(field.key));
+            return (
+              <Field key={field.key} label={field.label} hint={field.hint}>
+                <div className="flex items-center gap-2">
+                  <label className="inline-flex h-[34px] cursor-pointer items-center rounded-lg border border-[#d5d9d7] bg-white px-3 text-xs text-slate-600 transition-colors hover:bg-[#f2f5f4]">
+                    选择图片
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp,image/gif"
+                      className="hidden"
+                      onChange={async (event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (!file) return;
+                        setError("");
+                        try {
+                          const dataUrl = await readImageAsDataUrl(file, 512);
+                          setValue(field.key, dataUrl);
+                        } catch (err) {
+                          setError(`读取图片失败：${err.message}`);
+                        }
+                      }}
+                    />
+                  </label>
+
+                  {preview ? (
+                    <>
+                      <img
+                        src={preview}
+                        alt=""
+                        className="h-[34px] w-[34px] rounded-md border border-[#e8eae7] object-cover"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setValue(field.key, "")}
+                        className="text-xs text-red-500 transition-colors hover:text-red-700"
+                      >
+                        清除
+                      </button>
+                    </>
+                  ) : (
+                    <span className="text-xs text-slate-400">未设置（用前端自带的默认）</span>
+                  )}
+                </div>
+              </Field>
+            );
+          }
+
           if (field.type === "select") {
             return (
               <Field key={field.key} label={field.label} hint={field.hint}>
@@ -299,6 +724,31 @@ function SettingsGroup({ group, title, description, settings, onSaved, setError,
                     </option>
                   ))}
                 </select>
+              </Field>
+            );
+          }
+
+          // 可输入 + 可下拉：点箭头**永远列出全部候选**
+          // （原生 datalist 在输入框有内容时只会筛选，匹配不到就是空列表，用户会以为"没有模型"）
+          if (field.type === "datalist") {
+            const options = fieldOptions[field.optionsKey] || [];
+            const isModelField = field.key === "model" && typeof onFetchModels === "function";
+            return (
+              <Field key={field.key} label={field.label} hint={field.hint}>
+                <ComboField
+                  value={textValue(field.key)}
+                  onChange={(next) => setValue(field.key, next)}
+                  placeholder={field.hint || ""}
+                  inputClass={inputClass}
+                  options={options}
+                  onFetch={isModelField ? onFetchModels : undefined}
+                  fetching={isModelField ? modelsBusy : false}
+                />
+                {options.length ? (
+                  <span className="block text-xs text-slate-400 mt-1">
+                    已拉取 {options.length} 个候选：点右侧箭头看全部，也可以直接手输
+                  </span>
+                ) : null}
               </Field>
             );
           }
@@ -710,7 +1160,524 @@ function DashboardPanel() {
           )}
         </div>
       </div>
+
+      {/* 运行指标：接口耗时 + AI 用量 + 内容安全命中 */}
+      <MetricsBlock />
     </section>
+  );
+}
+
+/** 后台歌单管理：本地上传 / 外链直链 / 网易云 */
+function MusicTracksPanel({ setError, setNotice }) {
+  const [data, setData] = useState(null);
+  const [busy, setBusy] = useState("");
+  const [title, setTitle] = useState("");
+  const [artist, setArtist] = useState("");
+  const [source, setSource] = useState("url");
+  const [url, setUrl] = useState("");
+  const [neteaseId, setNeteaseId] = useState("");
+  const [neteaseType, setNeteaseType] = useState("2");
+  // 管理员备注：只在后台显示，用户端拿不到
+  const [adminNote, setAdminNote] = useState("");
+  const fileRef = useRef(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api("/api/admin/music");
+      setData(res);
+    } catch (err) {
+      setError(err.message);
+    }
+  }, [setError]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  /**
+   * 「取名称」：请求网易云**公开网页**读取歌名 / 歌单名，自动填进输入框。
+   * 网易云官方没有开放"按 ID 取名称"的接口，所以这里只读网页标题；
+   * 拿不到就让管理员手填 —— 不重试、不伪造。
+   */
+  async function fetchNeteaseName() {
+    setBusy("fetchName");
+    setError("");
+    setNotice("");
+    try {
+      const result = await api(
+        `/api/admin/music/netease-info?id=${encodeURIComponent(neteaseId)}&type=${neteaseType}`
+      );
+      if (!result?.ok) throw new Error(result?.error || "取不到名称");
+      if (result.title) setTitle(result.title);
+      if (result.artist) setArtist(result.artist);
+      setNotice(`已读取到：${result.raw || result.title}`);
+    } catch (err) {
+      setError("取名称失败：" + err.message + "（可以手动填写）");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  /** 导入音乐包：选一个 JSON 文件，上传后新增歌单与音频 */
+  async function handleImport(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!window.confirm("导入会新增歌单与音频文件。继续？")) {
+      event.target.value = "";
+      return;
+    }
+    setBusy("import");
+    setError("");
+    setNotice("");
+    try {
+      const text = await file.text();
+      const pack = JSON.parse(text);
+      const res = await fetch("/api/admin/music/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pack),
+      });
+      const result = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(result?.error || `导入失败（HTTP ${res.status}）`);
+      setNotice(
+        `导入完成：新增歌曲 ${result.addedTracks} 首、音频 ${result.addedFiles} 个` +
+          (result.skippedTracks ? `，跳过 ${result.skippedTracks} 条` : "")
+      );
+      await load();
+    } catch (err) {
+      setError("导入失败：" + err.message);
+    } finally {
+      setBusy("");
+      event.target.value = "";
+    }
+  }
+
+  async function handleUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setBusy("upload");
+    setError("");
+    setNotice("");
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("title", title || file.name.replace(/\.[^.]+$/, ""));
+      fd.append("artist", artist || "");
+      const res = await fetch("/api/admin/music/upload", { method: "POST", body: fd });
+      const result = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(result?.error || `上传失败（HTTP ${res.status}）`);
+      setNotice(`已上传：${result.title}（${Math.round((result.bytes || 0) / 1024)}KB）`);
+      setTitle("");
+      setArtist("");
+      await load();
+    } catch (err) {
+      setError("上传失败：" + err.message);
+    } finally {
+      setBusy("");
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function handleAdd() {
+    setBusy("add");
+    setError("");
+    setNotice("");
+    try {
+      await api("/api/admin/music", {
+        method: "POST",
+        body: { source, title, artist, url, neteaseId, neteaseType, adminNote },
+      });
+      setNotice(source === "netease" ? "已添加网易云歌曲" : "已添加外链歌曲");
+      setTitle("");
+      setArtist("");
+      setUrl("");
+      setNeteaseId("");
+      setAdminNote("");
+      await load();
+    } catch (err) {
+      setError("添加失败：" + err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleRemove(track) {
+    if (!window.confirm(`删除「${track.title}」？${track.source === "local" ? "本地文件也会一起删掉。" : ""}`)) {
+      return;
+    }
+    setBusy(`del-${track.id}`);
+    try {
+      await api(`/api/admin/music?id=${encodeURIComponent(track.id)}`, { method: "DELETE" });
+      setNotice("已删除");
+      await load();
+    } catch (err) {
+      setError("删除失败：" + err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleToggle(track) {
+    setBusy(`toggle-${track.id}`);
+    try {
+      await api("/api/admin/music", {
+        method: "PATCH",
+        body: { id: track.id, enabled: Number(track.enabled) !== 1 },
+      });
+      await load();
+    } catch (err) {
+      setError("操作失败：" + err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleMove(track, delta) {
+    const next = Number(track.sort_order || 0) + delta;
+    setBusy(`move-${track.id}`);
+    try {
+      await api("/api/admin/music", { method: "PATCH", body: { id: track.id, sortOrder: next } });
+      await load();
+    } catch (err) {
+      setError("调整顺序失败：" + err.message);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const tracks = data?.tracks || [];
+  const disk = data?.disk || { count: 0, mb: 0 };
+  const isNetease = source === "netease";
+
+  return (
+    <section className={`${cardClass} mb-4`}>
+      <div className="flex items-start justify-between mb-3">
+        <div>
+          <h2 className="text-sm font-bold text-slate-800">歌单管理</h2>
+          <p className="text-xs text-slate-500 mt-1">
+            本地文件存在 public/music/，共 {disk.count} 个文件 · 约 {disk.mb} MB
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className={btnBase} onClick={load}>
+            刷新
+          </button>
+          <button
+            type="button"
+            className={btnBase}
+            onClick={() => window.open("/api/admin/music/export", "_blank")}
+            title="把歌单与全部音频导出成一个 JSON 文件（换服务器/备份用）"
+          >
+            导出音乐包
+          </button>
+          <label className={`${btnBase} px-3 py-1.5 text-xs cursor-pointer`}>
+            导入音乐包
+            <input
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={handleImport}
+            />
+          </label>
+        </div>
+      </div>
+
+      {/* 添加区 */}
+      <div className="border border-[#e6e8e6] rounded-lg p-3 mb-3 space-y-2">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+          <Field label={source === "netease" ? "名称（可点右侧「取名称」自动填）" : "歌名"}>
+            <input
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              className={inputClass}
+              placeholder={
+                source === "netease" ? "留空会自动取，也可以手填" : "留空则用文件名"
+              }
+            />
+          </Field>
+          <Field label="歌手（可空）">
+            <input value={artist} onChange={(e) => setArtist(e.target.value)} className={inputClass} />
+          </Field>
+        </div>
+
+        {/* 本地上传 */}
+        <div className="pt-2 border-t border-[#f0f2f0]">
+          <p className="text-xs text-slate-600 mb-1.5">
+            ① 上传本地音频（mp3 / m4a / wav / ogg，单个不超过 20MB）
+          </p>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".mp3,.m4a,.wav,.ogg,audio/*"
+            onChange={handleUpload}
+            disabled={busy === "upload"}
+            className="text-xs text-slate-600"
+          />
+          {busy === "upload" ? <span className="text-xs text-slate-400 ml-2">上传中...</span> : null}
+        </div>
+
+        {/* 外链 / 网易云 */}
+        <div className="pt-2 border-t border-[#f0f2f0] space-y-2">
+          <p className="text-xs text-slate-600">② 或添加链接</p>
+          <div className="flex gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => setSource("url")}
+              className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${
+                !isNetease
+                  ? "border-[#8fb3c7] bg-[#e8eff2] text-slate-800"
+                  : "border-[#d5d9d7] text-slate-500 hover:bg-[#f2f5f4]"
+              }`}
+            >
+              外链直链
+            </button>
+            <button
+              type="button"
+              onClick={() => setSource("netease")}
+              className={`px-3 py-1.5 text-xs rounded-lg border transition-colors ${
+                isNetease
+                  ? "border-[#8fb3c7] bg-[#e8eff2] text-slate-800"
+                  : "border-[#d5d9d7] text-slate-500 hover:bg-[#f2f5f4]"
+              }`}
+            >
+              网易云收藏
+            </button>
+          </div>
+
+          {isNetease ? (
+            <>
+              <Field label="内容类型">
+                <select
+                  value={neteaseType}
+                  onChange={(e) => setNeteaseType(e.target.value)}
+                  className={inputClass}
+                >
+                  <option value="2">单曲（type=2）</option>
+                  <option value="0">歌单（type=0，会显示完整歌曲列表）</option>
+                </select>
+              </Field>
+              <Field label={neteaseType === "0" ? "网易云歌单 ID" : "网易云歌曲 ID"}>
+                <div className="flex gap-2">
+                  <input
+                    value={neteaseId}
+                    onChange={(e) => setNeteaseId(e.target.value)}
+                    className={inputClass}
+                    placeholder="例如 1901371647，或粘贴含 id= 的链接"
+                  />
+                  <button
+                    type="button"
+                    disabled={busy === "fetchName" || !neteaseId.trim()}
+                    onClick={fetchNeteaseName}
+                    className={`${btnBase} shrink-0`}
+                    title="请求网易云公开网页读取名称，自动填到上面的输入框"
+                  >
+                    {busy === "fetchName" ? "读取中…" : "取名称"}
+                  </button>
+                </div>
+              </Field>
+
+              <Field label="管理员备注（只有后台能看到）">
+                <textarea
+                  value={adminNote}
+                  onChange={(e) => setAdminNote(e.target.value)}
+                  rows={2}
+                  className={inputClass}
+                  placeholder="例如：热歌榜 / 比赛用 / 备用 —— 用户端不会显示这一栏"
+                />
+              </Field>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                ⚠️ 只填 ID，不做任何解析 —— 网易云官方没有开放播放地址接口。
+                用户端会用**官方外链播放器**嵌入，**用户可以点播放器里的按钮播放/暂停/切歌**；
+                但我们（代码）控制不了它，也进不了自动播放队列（跨域限制）。
+              </p>
+            </>
+          ) : (
+            <Field label="音频直链">
+              <input
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+                className={inputClass}
+                placeholder="https://你的域名/xxx.mp3"
+              />
+            </Field>
+          )}
+
+          <button
+            type="button"
+            className={btnPrimary}
+            disabled={busy === "add"}
+            onClick={handleAdd}
+          >
+            {busy === "add" ? "添加中..." : "添加"}
+          </button>
+        </div>
+      </div>
+
+      {/* 列表 */}
+      {!tracks.length ? (
+        <p className="text-xs text-slate-400 py-4 text-center">还没有歌曲</p>
+      ) : (
+        <ul className="space-y-2">
+          {tracks.map((track) => (
+            <li
+              key={track.id}
+              className="border border-[#e6e8e6] rounded-lg px-3 py-2 flex items-center justify-between gap-3"
+            >
+              <div className="min-w-0">
+                <p className="text-sm text-slate-700 truncate">
+                  {track.title}
+                  {track.artist ? <span className="text-slate-400"> · {track.artist}</span> : null}
+                </p>
+                <p className="text-xs text-slate-400 truncate mt-0.5">
+                  来源：
+                  {track.source === "local" ? "本地上传" : track.source === "netease" ? "网易云" : "外链"}
+                  {track.source === "netease" && String(track.netease_type) === "0" ? "歌单" : ""}
+                  {Number(track.enabled) === 1 ? " · 启用中" : " · 已停用"}
+                  {track.url ? ` · ${track.url}` : ""}
+                </p>
+                {track.admin_note ? (
+                  <p className="text-xs text-amber-600 truncate mt-0.5" title="只有后台能看到这一栏">
+                    备注：{track.admin_note}
+                  </p>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button type="button" className={`${btnBase} px-2 py-1 text-xs`} disabled={busy === `move-${track.id}`} onClick={() => handleMove(track, -1)} title="上移">
+                  ↑
+                </button>
+                <button type="button" className={`${btnBase} px-2 py-1 text-xs`} disabled={busy === `move-${track.id}`} onClick={() => handleMove(track, 1)} title="下移">
+                  ↓
+                </button>
+                <button type="button" className={`${btnBase} px-2 py-1 text-xs`} disabled={busy === `toggle-${track.id}`} onClick={() => handleToggle(track)}>
+                  {Number(track.enabled) === 1 ? "停用" : "启用"}
+                </button>
+                <button
+                  type="button"
+                  disabled={busy === `del-${track.id}`}
+                  onClick={() => handleRemove(track)}
+                  className="border border-[#e5c9c9] bg-[#fdf6f6] text-red-500 rounded-lg px-2 py-1 text-xs hover:bg-[#fbecec] transition-colors"
+                >
+                  删除
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** 运行指标：接口耗时、AI 用量、内容安全命中（数据来自 /api/admin/metrics） */
+function MetricsBlock() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setError("");
+      const res = await api("/api/admin/metrics?days=7");
+      setData(res);
+    } catch (err) {
+      setError(err.message);
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (error) {
+    return <p className="text-xs text-red-500 mt-3">运行指标读取失败：{error}</p>;
+  }
+  if (!data) return null;
+
+  const db = data.database || {};
+  const usage = data.usage || {};
+  const apiPaths = (data.api?.paths || []).slice(0, 6);
+  const safety = data.safety || [];
+  const daily = data.daily || [];
+  const days = usage.days || 7;
+
+  return (
+    <div className="border border-[#e6e8e6] rounded-lg p-3 mt-4 space-y-4">
+      <div className="flex items-center justify-between">
+        <h3 className="text-xs font-bold text-slate-700">运行指标</h3>
+        <button type="button" className={btnBase} onClick={load}>
+          刷新
+        </button>
+      </div>
+
+      <div>
+        <p className="text-xs text-slate-600 mb-1.5">
+          接口耗时（本次启动以来 · 平均最慢的几个）
+        </p>
+        {apiPaths.length === 0 ? (
+          <p className="text-xs text-slate-400">还没有记录</p>
+        ) : (
+          <ul className="space-y-1">
+            {apiPaths.map((item) => (
+              <li key={item.path} className="flex justify-between text-xs gap-2">
+                <span className="text-slate-600 truncate">{item.path}</span>
+                <span className="text-slate-400 shrink-0">
+                  平均 {item.avgMs}ms · 最慢 {item.maxMs}ms · {item.count} 次
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-xs text-slate-400 mt-1">
+          数据库查询 {db.totalQueries || 0} 次 · 平均 {db.avgMs || 0}ms · 最慢 {db.maxMs || 0}ms
+          · 慢查询（≥{db.slowThresholdMs || 300}ms）{db.slowQueries || 0} 次
+        </p>
+      </div>
+
+      <div>
+        <p className="text-xs text-slate-600 mb-1.5">AI 用量（近 {days} 天）</p>
+        {(usage.calls || 0) === 0 ? (
+          <p className="text-xs text-slate-400">这段时间还没有调用记录</p>
+        ) : (
+          <>
+            <p className="text-xs text-slate-500">
+              共 {usage.calls} 次 · 消耗 {usage.totalTokens} tokens · 平均 {usage.avgMs}ms
+              {usage.failures ? ` · 失败 ${usage.failures} 次` : ""}
+            </p>
+            <ul className="space-y-1 mt-1">
+              {(usage.byKind || []).map((item) => (
+                <li key={item.kind} className="flex justify-between text-xs">
+                  <span className="text-slate-600">{item.kind}</span>
+                  <span className="text-slate-400">
+                    {item.calls} 次 · {item.tokens} tokens · 平均 {item.avgMs}ms
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
+        {daily.length ? (
+          <p className="text-xs text-slate-400 mt-1">
+            另有 {daily.length} 条按天汇总的历史记录（明细清理后仍保留）
+          </p>
+        ) : null}
+      </div>
+
+      <div>
+        <p className="text-xs text-slate-600 mb-1.5">内容安全命中（近 {days} 天）</p>
+        {safety.length === 0 ? (
+          <p className="text-xs text-slate-400">这段时间没有命中记录</p>
+        ) : (
+          <ul className="space-y-1">
+            {safety.map((item) => (
+              <li key={item.category} className="flex justify-between text-xs">
+                <span className="text-slate-600">{item.category}</span>
+                <span className="text-slate-400">{item.count} 次</span>
+              </li>
+            ))}
+          </ul>
+        )}
+        <p className="text-xs text-slate-400 mt-1">只记录命中的类别，不保存用户原话</p>
+      </div>
+    </div>
   );
 }
 
@@ -2034,6 +3001,67 @@ export default function AdminPage() {
   const [notice, setNotice] = useState("");
   const [ttsText, setTtsText] = useState("你好，我是 Solace，今天也愿意听你说说。");
   const [ttsBusy, setTtsBusy] = useState(false);
+
+  // 对话 AI：拉取到的可用模型列表 + 「测试连接」的结果
+  const [aiModels, setAiModels] = useState([]);
+  const [aiModelsBusy, setAiModelsBusy] = useState(false);
+
+  // 数据审核的模型列表 / 测试连接状态（和对话 AI 那套完全独立）
+  const [reviewModels, setReviewModels] = useState([]);
+  const [reviewModelsBusy, setReviewModelsBusy] = useState(false);
+  const [reviewTestBusy, setReviewTestBusy] = useState(false);
+  const [reviewTestResult, setReviewTestResult] = useState(null);
+
+  /**
+   * 拉取审核 AI 的可用模型。
+   * ⚠️ 这里只填「下拉候选」，不会自动改模型名字段 —— 用户点了候选才生效。
+   */
+  async function fetchReviewModels() {
+    setReviewModelsBusy(true);
+    setError("");
+    try {
+      const data = await api("/api/admin/review", {
+        method: "POST",
+        body: { action: "models" },
+      });
+      const list = Array.isArray(data?.models) ? data.models : [];
+      setReviewModels(list);
+
+      if (!data?.ok) {
+        setNotice(
+          `没能自动获取模型列表（${data?.error || "未知原因"}），直接手动输入模型名即可`
+        );
+      } else if (list.length) {
+        setNotice(`已获取 ${list.length} 个模型，点模型名输入框右侧的箭头选择`);
+      } else {
+        setNotice("上游返回了空列表，请手动输入模型名");
+      }
+    } catch (err) {
+      setError("拉取模型失败：" + err.message);
+    } finally {
+      setReviewModelsBusy(false);
+    }
+  }
+
+  /** 测一次审核 AI 连通性（用已保存的配置，改了配置要先保存） */
+  async function testReviewConnection() {
+    setReviewTestBusy(true);
+    setReviewTestResult(null);
+    setError("");
+    try {
+      const result = await api("/api/admin/review", {
+        method: "POST",
+        body: { action: "test" },
+      });
+      setReviewTestResult(result);
+    } catch (err) {
+      setReviewTestResult({ ok: false, error: err.message, hint: "" });
+    } finally {
+      setReviewTestBusy(false);
+    }
+  }
+  const [aiTestBusy, setAiTestBusy] = useState(false);
+  const [aiTestResult, setAiTestResult] = useState(null);
   const [mailTo, setMailTo] = useState("");
   const [mailBusy, setMailBusy] = useState(false);
 
@@ -2104,6 +3132,49 @@ export default function AdminPage() {
       setError(err.message);
     } finally {
       setTtsBusy(false);
+    }
+  }
+
+  /**
+   * 拉取上游可用的模型列表（OpenAI 协议的标准 GET /models 接口）。
+   * 用的是**已保存的配置** —— 所以改了 Key/地址之后要先点保存，再点这个按钮。
+   */
+  async function fetchAiModels() {
+    setAiModelsBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const data = await api("/api/admin/ai/models");
+      setAiModels(data.models || []);
+      if (data.ok && (data.models || []).length) {
+        setNotice(`拉取到 ${data.models.length} 个可用模型，点「模型名」输入框即可选择`);
+      } else if (data.ok) {
+        setNotice(data.hint || "上游没有返回模型列表，请手动输入模型名");
+      } else {
+        setError(
+          `拉取失败：${data.error || "未知原因"}${data.hint ? `（${data.hint}）` : ""}`
+        );
+      }
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setAiModelsBusy(false);
+    }
+  }
+
+  /** 用已保存的配置发一句「你好」，验证接口地址 / Key / 模型名是否都正确 */
+  async function testAiConnection() {
+    setAiTestBusy(true);
+    setAiTestResult(null);
+    setError("");
+    setNotice("");
+    try {
+      const data = await api("/api/admin/ai/test", { method: "POST", body: {} });
+      setAiTestResult(data);
+    } catch (err) {
+      setAiTestResult({ ok: false, error: err.message });
+    } finally {
+      setAiTestBusy(false);
     }
   }
 
@@ -2241,12 +3312,156 @@ export default function AdminPage() {
           <SettingsGroup
             group="ai"
             title="对话 AI"
-            description="聊天接口使用这里配置的服务商。baseUrl 只写到版本目录，程序自动拼 /chat/completions。"
+            description="聊天接口使用这里配置的服务商。baseUrl 只写到版本目录，程序自动拼 /chat/completions。下面的两个工具都用「已保存的配置」，改了配置请先点右上角保存。"
+            settings={settings}
+            setError={setError}
+            setNotice={setNotice}
+            onSaved={loadAll}
+            fieldOptions={{ aiModels }}
+            onFetchModels={fetchAiModels}
+            modelsBusy={aiModelsBusy}
+          >
+            <div className="border-t border-[#eceeec] pt-3 mt-1 space-y-3">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* 「拉取可用模型」已挪到上面的模型名输入框里（右侧、下箭头左边） */}
+                <button
+                  type="button"
+                  className={btnBase}
+                  disabled={aiTestBusy}
+                  onClick={testAiConnection}
+                >
+                  {aiTestBusy ? "测试中..." : "测试连接"}
+                </button>
+                {aiModels.length ? (
+                  <span className="text-xs text-slate-400">已获取 {aiModels.length} 个模型</span>
+                ) : null}
+              </div>
+
+              {aiTestResult ? (
+                <div
+                  className={`text-xs rounded-lg border px-3 py-2 leading-relaxed ${
+                    aiTestResult.ok
+                      ? "border-[#c8e0cc] bg-[#f2f9f3] text-slate-700"
+                      : "border-[#e8cccc] bg-[#fdf4f4] text-slate-700"
+                  }`}
+                >
+                  {aiTestResult.ok ? (
+                    <>
+                      <p className="font-medium text-slate-800">
+                        ✅ 连接成功（{aiTestResult.latencyMs} ms）
+                      </p>
+                      <p className="mt-0.5">模型：{aiTestResult.model}</p>
+                      <p className="mt-0.5 break-words">回复：{aiTestResult.reply || "（空）"}</p>
+                    </>
+                  ) : (
+                    <>
+                      <p className="font-medium text-slate-800">❌ 连接失败</p>
+                      <p className="mt-0.5 break-words">{aiTestResult.error}</p>
+                      {aiTestResult.hint ? (
+                        <p className="mt-1 text-slate-500">建议：{aiTestResult.hint}</p>
+                      ) : null}
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </div>
+          </SettingsGroup>
+        ) : null}
+
+        {tab === "music" ? (
+          <>
+            <SettingsGroup
+              group="music"
+              title="背景音乐设置"
+              description="音源可随时切换：本地歌单支持自动播放与切歌；网易云收藏使用官方外链播放器（受官方限制，不能自动播放/切歌）。两种歌单可以同时维护。"
+              settings={settings}
+              setError={setError}
+              setNotice={setNotice}
+              onSaved={loadAll}
+            />
+            <MusicTracksPanel setError={setError} setNotice={setNotice} />
+          </>
+        ) : null}
+
+        {tab === "safety" ? (
+          <SettingsGroup
+            group="safety"
+            title="内容安全"
+            description="在把用户消息发给 AI 之前先过一遍规则。只拦「自伤倾向 / 伤害他人 / 明显违法」三类；命中后不调用 AI，而是返回一句温和的承接话术 + 心理援助热线。词表改完保存立即生效，不用重启。"
             settings={settings}
             setError={setError}
             setNotice={setNotice}
             onSaved={loadAll}
           />
+        ) : null}
+
+        {tab === "review" ? (
+          <>
+            <SettingsGroup
+              group="review"
+              title="数据审核 · 审核 AI 与默认值"
+              description="用户改头像、背景、昵称、签名后会立刻生效，同时被打上「未审核」标记，之后由 AI 批量判定：合规清标记，违规改回下面配置的默认值。改完请先点右上角保存 —— 下面的「立即提交」用的是已保存的配置。"
+              settings={settings}
+              setError={setError}
+              setNotice={setNotice}
+              onSaved={loadAll}
+              fieldOptions={{ reviewModels }}
+              onFetchModels={fetchReviewModels}
+              modelsBusy={reviewModelsBusy}
+            >
+              <div className="border-t border-[#eceeec] pt-3 mt-1 space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    className={btnBase}
+                    disabled={reviewTestBusy}
+                    onClick={testReviewConnection}
+                    title="用已保存的配置发一次真实请求，验证地址 / Key / 模型名"
+                  >
+                    {reviewTestBusy ? "测试中..." : "测试连接"}
+                  </button>
+                  <span className="text-xs text-slate-400">
+                    测试的是「逐条调用」的对话接口；批量推理能否用，看提交后的批次结果
+                  </span>
+                </div>
+
+                {reviewTestResult ? (
+                  <div
+                    className={`text-xs rounded-lg border px-3 py-2 leading-relaxed ${
+                      reviewTestResult.ok
+                        ? "border-[#c8e0cc] bg-[#f2f9f3] text-slate-700"
+                        : "border-[#e8cccc] bg-[#fdf4f4] text-slate-700"
+                    }`}
+                  >
+                    {reviewTestResult.ok ? (
+                      <>
+                        <p className="font-medium text-slate-800">
+                          ✅ 连接成功（{reviewTestResult.latencyMs} ms）
+                        </p>
+                        <p className="mt-0.5">模型：{reviewTestResult.model}</p>
+                        <p className="mt-0.5 break-words">
+                          回复：{reviewTestResult.reply || "（空）"}
+                        </p>
+                        {reviewTestResult.hint ? (
+                          <p className="mt-1 text-slate-500">{reviewTestResult.hint}</p>
+                        ) : null}
+                      </>
+                    ) : (
+                      <>
+                        <p className="font-medium text-slate-800">❌ 连接失败</p>
+                        <p className="mt-0.5 break-words">{reviewTestResult.error}</p>
+                        {reviewTestResult.hint ? (
+                          <p className="mt-1 text-slate-500">建议：{reviewTestResult.hint}</p>
+                        ) : null}
+                      </>
+                    )}
+                  </div>
+                ) : null}
+              </div>
+            </SettingsGroup>
+
+            <ContentReviewPanel api={api} setError={setError} setNotice={setNotice} />
+          </>
         ) : null}
 
         {tab === "tts" ? (

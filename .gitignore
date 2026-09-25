@@ -1,12 +1,46 @@
-node_modules/
-.env
-.env.*
-!.env.example
-*.env
-config/db.json
-config/installed.lock
-.next/
-dist/
-build/
-logs/
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# testing
+/coverage
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
 .DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
+
+# 管理后台数据库连接信息（含数据库密码，绝不能提交）
+/config/db.json
+
+# 安装锁（安装向导完成后生成，用来禁止被重新安装）
+/config/installed.lock
+
+# PM2 运行日志
+/logs
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+"��ʾ��_�ɰ汸��_0920.txt" 

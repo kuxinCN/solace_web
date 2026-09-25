@@ -91,8 +91,22 @@ mysqldump \
 SIZE="$(du -h "$OUT_FILE" | cut -f1)"
 log "备份完成，大小 $SIZE"
 
+# 顺手把音乐目录也备一份：
+# 音频存在磁盘上、不在数据库里，只备份数据库的话换服务器会丢掉所有音乐。
+MUSIC_SRC="$APP_DIR/public/music"
+if [ -d "$MUSIC_SRC" ] && [ -n "$(ls -A "$MUSIC_SRC" 2>/dev/null)" ]; then
+  MUSIC_OUT="$BACKUP_DIR/music-${STAMP}.tar.gz"
+  if tar czf "$MUSIC_OUT" -C "$APP_DIR/public" music 2>/dev/null; then
+    log "音乐目录已备份，大小 $(du -h "$MUSIC_OUT" | cut -f1)"
+  else
+    log "⚠️ 音乐目录备份失败（不影响数据库备份）"
+  fi
+else
+  log "跳过音乐备份（public/music 为空或不存在）"
+fi
+
 # 清理过期备份
-DELETED="$(find "$BACKUP_DIR" -maxdepth 1 -name "${DB_NAME}-*.sql.gz" -type f -mtime "+$KEEP_DAYS" -print -delete | wc -l)"
+DELETED="$(find "$BACKUP_DIR" -maxdepth 1 \( -name "${DB_NAME}-*.sql.gz" -o -name "music-*.tar.gz" \) -type f -mtime "+$KEEP_DAYS" -print -delete | wc -l)"
 if [ "$DELETED" -gt 0 ]; then
   log "已清理 $DELETED 个超过 $KEEP_DAYS 天的旧备份"
 fi

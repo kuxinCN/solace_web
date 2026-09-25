@@ -7,18 +7,19 @@ import { useState } from "react";
 export default function WelcomeOverlay({ onFinish }) {
   const [leaving, setLeaving] = useState(false);
 
-  // 漂浮气泡配置：淡蓝 / 米色 / 浅粉，大小与周期不一，延迟错开
+  // 漂浮气泡配置：淡蓝 / 米色 / 浅粉，大小与周期不一，延迟错开。
+  // 色值比背景明显深一档，配合下面的透明度，保证在浅色渐变上依然看得见。
   const bubbles = [
-    { size: 150, left: "5%", top: "10%", color: "#bcd7e8", dur: "9s", delay: "0s" },
-    { size: 70, left: "16%", top: "62%", color: "#f0e4d4", dur: "7.5s", delay: "1.2s" },
-    { size: 110, left: "12%", top: "34%", color: "#f3d9dc", dur: "11s", delay: "0.6s" },
-    { size: 55, left: "28%", top: "82%", color: "#cfe3ef", dur: "6.5s", delay: "2s" },
-    { size: 90, left: "78%", top: "14%", color: "#ede4cf", dur: "8.5s", delay: "0.9s" },
-    { size: 130, left: "86%", top: "52%", color: "#bcd7e8", dur: "10s", delay: "1.6s" },
-    { size: 65, left: "70%", top: "76%", color: "#f3d9dc", dur: "7s", delay: "0.3s" },
-    { size: 45, left: "55%", top: "8%", color: "#cfe3ef", dur: "6s", delay: "1.8s" },
-    { size: 80, left: "42%", top: "88%", color: "#e8d5c4", dur: "9.5s", delay: "0.5s" },
-    { size: 100, left: "90%", top: "30%", color: "#f0dcd0", dur: "12s", delay: "2.4s" },
+    { size: 150, left: "5%", top: "10%", color: "#9cc3dd", dur: "9s", delay: "0s" },
+    { size: 70, left: "16%", top: "62%", color: "#e3cdaa", dur: "7.5s", delay: "1.2s" },
+    { size: 110, left: "12%", top: "34%", color: "#e7b9c2", dur: "11s", delay: "0.6s" },
+    { size: 55, left: "28%", top: "82%", color: "#a9cde3", dur: "6.5s", delay: "2s" },
+    { size: 90, left: "78%", top: "14%", color: "#ded0a8", dur: "8.5s", delay: "0.9s" },
+    { size: 130, left: "86%", top: "52%", color: "#9cc3dd", dur: "10s", delay: "1.6s" },
+    { size: 65, left: "70%", top: "76%", color: "#e7b9c2", dur: "7s", delay: "0.3s" },
+    { size: 45, left: "55%", top: "8%", color: "#a9cde3", dur: "6s", delay: "1.8s" },
+    { size: 80, left: "42%", top: "88%", color: "#d9bda3", dur: "9.5s", delay: "0.5s" },
+    { size: 100, left: "90%", top: "30%", color: "#e4c2b3", dur: "12s", delay: "2.4s" },
   ];
 
   // 点击进入：整体淡出 0.5s 后跳转；期间忽略重复点击
@@ -58,7 +59,7 @@ export default function WelcomeOverlay({ onFinish }) {
         }
       `}</style>
 
-      {/* 漂浮气泡：半透明，不抢文字视线 */}
+      {/* 漂浮气泡：半透明，边缘柔化，颜色比之前明显一档（浅色渐变上也能看清） */}
       {bubbles.map((b, i) => (
         <span
           key={i}
@@ -68,30 +69,40 @@ export default function WelcomeOverlay({ onFinish }) {
             height: b.size,
             left: b.left,
             top: b.top,
-            backgroundColor: b.color,
-            opacity: 0.2,
+            // 径向渐变：中心实、边缘散开，避免生硬的圆边
+            background: `radial-gradient(circle at 34% 30%, ${b.color} 0%, ${b.color} 52%, ${b.color}00 100%)`,
+            opacity: 0.5,
             animation: `welcome-float ${b.dur} ease-in-out ${b.delay} infinite`,
           }}
         />
       ))}
 
-      {/* 中央文字：逐行淡入 */}
+      {/* 中央文字：逐行淡入（衬线 display 字体，安静而有文气） */}
       <div className="relative z-10 text-center px-6">
         <h1
-          className="text-3xl md:text-4xl font-bold text-[#5c6672] mb-5"
-          style={{ animation: "welcome-fade-line 1s ease-out both" }}
+          className="font-display text-3xl md:text-4xl font-bold text-[#525c68] mb-5"
+          style={{
+            animation: "welcome-fade-line 1s ease-out both",
+            textShadow: "0 1px 10px rgba(255,255,255,0.9)",
+          }}
         >
           欢迎来到Solace
         </h1>
         <p
-          className="text-lg text-[#6b7683] mb-2"
-          style={{ animation: "welcome-fade-line 1s ease-out 0.6s both" }}
+          className="font-display text-lg text-[#68737f] mb-2"
+          style={{
+            animation: "welcome-fade-line 1s ease-out 0.6s both",
+            textShadow: "0 1px 8px rgba(255,255,255,0.9)",
+          }}
         >
           在这里，我们倾听一切
         </p>
         <p
-          className="text-lg text-[#6b7683] mb-12"
-          style={{ animation: "welcome-fade-line 1s ease-out 1.2s both" }}
+          className="font-display text-lg text-[#68737f] mb-12"
+          style={{
+            animation: "welcome-fade-line 1s ease-out 1.2s both",
+            textShadow: "0 1px 8px rgba(255,255,255,0.9)",
+          }}
         >
           夜再深，也有一盏灯为你而亮
         </p>

@@ -7,21 +7,75 @@
   --foreground: #171717;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  /* 中文优先字体栈：mac 用苹方，Windows 用微软雅黑，其余走系统无衬线 */
+  font-family:
+    -apple-system,
+    "PingFang SC",
+    "Microsoft YaHei",
+    "Noto Sans SC",
+    sans-serif;
+}
+
+/* 消息气泡出现：上浮 8px + 淡入（只动 transform/opacity，合成层动画，不触发布局） */
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* tab 切换：内容区淡入 */
+@keyframes tab-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* 弹窗打开：整体淡入（只动 opacity，合成层动画，不触发布局） */
+@keyframes modal-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @layer utilities {
-  .text-balance {
-    text-wrap: balance;
+  /* 品牌展示字体：仅用于「Solace」品牌字与欢迎页大标题（衬线，安静而有文气） */
+  .font-display {
+    font-family: "Noto Serif SC", "Songti SC", serif;
+  }
+
+  .msg-in {
+    animation: msg-in 150ms ease-out both;
+  }
+
+  .tab-fade {
+    animation: tab-fade 120ms ease-out both;
+  }
+
+  /* 弹窗淡入：200ms ease-out */
+  .modal-fade {
+    animation: modal-fade-in 200ms ease-out both;
+  }
+
+  /* 减弱动态偏好：跳过上浮/淡入 */
+  @media (prefers-reduced-motion: reduce) {
+    .msg-in,
+    .tab-fade,
+    .modal-fade {
+      animation: none;
+    }
   }
 }

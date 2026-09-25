@@ -6,7 +6,7 @@ export default function AboutModal({ open, onClose }) {
 
   return (
     <div
-      className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+      className="modal-fade fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={onClose}
     >
       <div
@@ -25,7 +25,7 @@ export default function AboutModal({ open, onClose }) {
         </div>
         <button
           onClick={onClose}
-          className="w-full border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-lg py-2 text-sm hover:bg-[#6d99b5] active:scale-[0.98] transition-all duration-150"
+          className="w-full border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-lg py-2 text-sm hover:bg-[#6d99b5] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
         >
           知道了
         </button>

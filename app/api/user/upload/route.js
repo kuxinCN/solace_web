@@ -24,6 +24,7 @@ const KIND_COLUMN = {
   avatar: "avatar_url",
   aiAvatar: "ai_avatar_url",
   background: "chat_background_url",
+  diaryBackground: "diary_background_url",
 };
 
 const DATA_URL_PATTERN = /^data:image\/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$/i;

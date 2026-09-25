@@ -19,8 +19,18 @@ import { json, jsonError, readJsonBody } from "@/lib/util";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** 视为「还没起过名字」的默认标题 */
-const DEFAULT_TITLES = ["", "新对话", "新的对话", "新聊天", "无题", "未命名"];
+/** 视为「还没起过名字」的默认标题（含兜底标题，允许被二次生成覆盖） */
+const DEFAULT_TITLES = [
+  "",
+  "新对话",
+  "新的对话",
+  "新聊天",
+  "无题",
+  "未命名",
+  "英文询问需求",
+  "数字询问需求",
+  "符号询问需求",
+];
 
 function parseId(value) {
   const text = String(value ?? "").trim();

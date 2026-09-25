@@ -13,6 +13,7 @@
  */
 import { getAdminFromRequest, logAudit } from "@/lib/admin-auth";
 import { describeDbError, execute, query } from "@/lib/db";
+import { ensureUserColumnsOnce } from "@/lib/schema";
 import { cleanString, clientIp, json, jsonError } from "@/lib/util";
 
 export const runtime = "nodejs";
@@ -73,8 +74,11 @@ export async function GET(request) {
     }
 
     if (type === "diaries") {
+      // 老部署升级时自动补 mood 列，避免 Unknown column
+      await ensureUserColumnsOnce();
+
       const diaries = await query(
-        `SELECT id, title, content, created_at FROM diaries
+        `SELECT id, title, content, mood, created_at FROM diaries
           WHERE user_id = ? ORDER BY id DESC LIMIT ${MAX_ROWS}`,
         [userId]
       );

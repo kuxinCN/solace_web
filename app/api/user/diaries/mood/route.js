@@ -11,7 +11,7 @@
 import { analyzeDiaryMood } from "@/lib/ai";
 import { describeDbError, execute, query } from "@/lib/db";
 import { rateLimit } from "@/lib/rate-limit";
-import { ensureDiaryColumnsOnce } from "@/lib/schema";
+import { ensureUserColumnsOnce } from "@/lib/schema";
 import { getCurrentUser } from "@/lib/user-auth";
 import { json, jsonError, readJsonBody } from "@/lib/util";
 
@@ -38,8 +38,12 @@ export async function POST(request) {
     return jsonError(`操作太频繁，请 ${quota.retryAfterSeconds} 秒后再试`, 429);
   }
 
-  // 老部署升级时自动补 mood 列
-  await ensureDiaryColumnsOnce();
+  // 老部署升级时自动补 mood 列（失败不影响后续逻辑，查询会自己报错）
+  try {
+    await ensureUserColumnsOnce();
+  } catch {
+    /* 忽略 */
+  }
 
   const body = await readJsonBody(request);
   const id = parseId(body.id);

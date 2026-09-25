@@ -121,12 +121,17 @@ CREATE TABLE IF NOT EXISTS `users` (
   `password_enc`  VARCHAR(255) NULL COMMENT '可逆加密(AES)后的密码，后台可解密查看',
   `username`      VARCHAR(64)  NULL COMMENT '显示名称',
   `avatar_url`    VARCHAR(255) NULL,
+  `ai_avatar_url` MEDIUMTEXT   NULL COMMENT 'AI 头像（base64 data URL）',
+  `chat_background_url` MEDIUMTEXT NULL COMMENT '聊天背景（base64 data URL）',
+  `diary_background_url` MEDIUMTEXT NULL COMMENT '我的页封面背景（base64 data URL）',
   `gender`        VARCHAR(16)  NULL COMMENT '性别',
   `birthday`      VARCHAR(10)  NULL COMMENT '出生年月，YYYY-MM 或 YYYY-MM-DD',
   `phone`         VARCHAR(32)  NULL COMMENT '手机号',
   `remark`        VARCHAR(255) NULL COMMENT '备注',
   `status`        TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 正常 0 禁用',
   `source`        VARCHAR(16)  NOT NULL DEFAULT 'email' COMMENT 'email 自助注册 / admin 后台添加',
+  `bio`           VARCHAR(100) NULL COMMENT '个性签名',
+  `ai_persona`    VARCHAR(16)  NULL COMMENT '偏好的 AI 人格：male / female',
   `created_at`    DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `last_login_at` DATETIME     NULL,
   PRIMARY KEY (`id`),
@@ -143,6 +148,9 @@ CREATE TABLE IF NOT EXISTS `users` (
 --   ALTER TABLE `users` ADD COLUMN `remark` VARCHAR(255) NULL AFTER `phone`;
 --   ALTER TABLE `users` ADD COLUMN `status` TINYINT(1) NOT NULL DEFAULT 1 AFTER `remark`;
 --   ALTER TABLE `users` ADD COLUMN `source` VARCHAR(16) NOT NULL DEFAULT 'email' AFTER `status`;
+--   ALTER TABLE `users` ADD COLUMN `ai_avatar_url` MEDIUMTEXT NULL AFTER `avatar_url`;
+--   ALTER TABLE `users` ADD COLUMN `chat_background_url` MEDIUMTEXT NULL AFTER `ai_avatar_url`;
+--   ALTER TABLE `users` ADD COLUMN `diary_background_url` MEDIUMTEXT NULL AFTER `chat_background_url`;
 --   ALTER TABLE `users` ADD UNIQUE KEY `uk_users_account` (`account`);
 -- （安装向导 / 后台会自动检查并补列，一般不需要手动执行）
 
@@ -201,10 +209,109 @@ CREATE TABLE IF NOT EXISTS `diaries` (
   `user_id`    INT UNSIGNED NOT NULL,
   `title`      VARCHAR(120) NOT NULL DEFAULT '无题',
   `content`    MEDIUMTEXT NOT NULL,
+  `mood`       VARCHAR(16)  NULL COMMENT '情绪标签（AI 打标）',
+  `is_pinned`    TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 表示已置顶',
+  `is_favorited` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 表示已收藏',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_diary_user` (`user_id`, `created_at`),
   CONSTRAINT `fk_diary_user` FOREIGN KEY (`user_id`)
     REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户日记';
+
+CREATE TABLE IF NOT EXISTS `user_memories` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`    INT UNSIGNED NOT NULL,
+  `content`    VARCHAR(200) NOT NULL COMMENT '一条长期记忆，如"她养了一只叫团子的猫"',
+  `category`   VARCHAR(32)  NULL COMMENT '分类标签，可为空',
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_memory_user` (`user_id`, `created_at`),
+  CONSTRAINT `fk_memory_user` FOREIGN KEY (`user_id`)
+    REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户长期记忆';
+
+CREATE TABLE IF NOT EXISTS `trash` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`    INT UNSIGNED NOT NULL,
+  `item_type`  VARCHAR(16)  NOT NULL COMMENT 'diary / conversation / message / memory',
+  `title`      VARCHAR(160) NULL COMMENT '回收站列表里展示的标题',
+  `payload`    JSON         NOT NULL COMMENT '被删除条目的完整内容，用于恢复',
+  `deleted_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `expire_at`  DATETIME     NOT NULL COMMENT '到期后由清理任务彻底删除',
+  PRIMARY KEY (`id`),
+  KEY `idx_trash_user` (`user_id`, `deleted_at`),
+  KEY `idx_trash_expire` (`expire_at`),
+  CONSTRAINT `fk_trash_user` FOREIGN KEY (`user_id`)
+    REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='回收站（默认保留 3 天）';
+
+CREATE TABLE IF NOT EXISTS `ai_usage` (
+  `id`                INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`           INT UNSIGNED NULL COMMENT '不设外键：用户注销后仍要保留用量统计',
+  `kind`              VARCHAR(16)  NOT NULL COMMENT 'chat / tts / mood / title',
+  `model`             VARCHAR(120) NULL,
+  `prompt_tokens`     INT UNSIGNED NOT NULL DEFAULT 0,
+  `completion_tokens` INT UNSIGNED NOT NULL DEFAULT 0,
+  `latency_ms`        INT UNSIGNED NOT NULL DEFAULT 0,
+  `ok`                TINYINT(1)   NOT NULL DEFAULT 1,
+  `created_at`        DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_usage_created` (`created_at`),
+  KEY `idx_usage_user` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 调用量统计';
+
+CREATE TABLE IF NOT EXISTS `ai_usage_daily` (
+  `id`                INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `day`               DATE         NOT NULL COMMENT '统计日期',
+  `kind`              VARCHAR(16)  NOT NULL COMMENT 'chat / tts / mood / title',
+  `calls`             INT UNSIGNED NOT NULL DEFAULT 0,
+  `prompt_tokens`     BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  `completion_tokens` BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  `total_latency_ms`  BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '用于算平均耗时',
+  `failures`          INT UNSIGNED NOT NULL DEFAULT 0,
+  `updated_at`        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_daily_kind` (`day`, `kind`),
+  KEY `idx_daily_day` (`day`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='AI 用量按天汇总（明细清理后仍能看长期趋势）';
+
+CREATE TABLE IF NOT EXISTS `safety_flags` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`    INT UNSIGNED NULL COMMENT '不设外键：注销后仍保留记录',
+  `category`   VARCHAR(24)  NOT NULL COMMENT 'self_harm / violence / illegal',
+  `matched`    VARCHAR(64)  NULL COMMENT '命中的规则名（不存原文）',
+  `source`     VARCHAR(16)  NOT NULL DEFAULT 'chat',
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_flag_created` (`created_at`),
+  KEY `idx_flag_user` (`user_id`, `created_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='内容安全命中记录（只记类别，不存原文）';
+
+CREATE TABLE IF NOT EXISTS `music_tracks` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `title`      VARCHAR(160) NOT NULL DEFAULT '未命名',
+  `artist`     VARCHAR(160) NULL COMMENT '歌手，可空',
+  `source`     VARCHAR(16)  NOT NULL DEFAULT 'local' COMMENT 'local=本地上传 / url=外链直链 / netease=网易云',
+  `url`        TEXT         NULL COMMENT 'local 存 /music/xxx.mp3；url 存完整外链',
+  `netease_id` VARCHAR(32)  NULL COMMENT '网易云内容 ID（歌曲或歌单）',
+  `netease_type` VARCHAR(4) NOT NULL DEFAULT '2' COMMENT '网易云播放器类型：2=单曲 / 0=歌单',
+  `sort_order` INT          NOT NULL DEFAULT 0 COMMENT '越小越靠前',
+  `enabled`    TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 启用 / 0 停用',
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_music_order` (`enabled`, `sort_order`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='背景音乐歌单（全局共享，不属于某个用户）';
+
+CREATE TABLE IF NOT EXISTS `assessment_results` (
+  `id`          INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `user_id`     INT UNSIGNED NOT NULL,
+  `type`        VARCHAR(16)  NOT NULL COMMENT 'personality=性格倾向 / emotion=情绪自评',
+  `data`        JSON         NOT NULL COMMENT '{"I":78,"N":82,"T":65,"P":71} 或 {"phq9":12,"gad7":9}',
+  `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_assessment_user` (`user_id`, `type`, `created_at`),
+  CONSTRAINT `fk_assessment_user` FOREIGN KEY (`user_id`)
+    REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='测评历史记录';
 -- ============================================================================

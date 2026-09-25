@@ -94,7 +94,7 @@ function BreathingAnimation({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+      className="modal-fade fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={handleBackdrop}
     >
       <div
@@ -204,7 +204,7 @@ function ButterflyAnimation({ onClose }) {
 
   return (
     <div
-      className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
+      className="modal-fade fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={handleBackdrop}
     >
       <div

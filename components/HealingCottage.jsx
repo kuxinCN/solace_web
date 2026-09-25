@@ -1,7 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import FirstAid from "@/components/FirstAid";
+import ConfirmModal from "@/components/ConfirmModal";
+import quotesData from "@/data/quotes.json";
 
 /* ================= 题库 ================= */
 
@@ -122,6 +124,67 @@ function loadHistory() {
 
 const todayCN = () => new Date().toLocaleDateString("zh-CN");
 
+/* ================= 每日心理学名言 ================= */
+
+// 把所有分类的名言拍平成一个数组，按 (分类, 索引) 作为唯一标识
+const ALL_QUOTES = Object.entries(quotesData).flatMap(([cat, list]) =>
+  list.map((q) => ({ ...q, key: `${cat}:${list.indexOf(q)}` }))
+);
+const TOTAL_QUOTES = ALL_QUOTES.length;
+
+// yyyy-mm-dd 格式的今天日期
+function todayStr() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+// 从 localStorage 读取名言状态，决定今天显示哪一条
+function pickTodayQuote() {
+  const today = todayStr();
+  let lastDate = "";
+  let usedIndices = [];
+  let currentIdx = -1;
+  try {
+    lastDate = localStorage.getItem("solace_quote_last_date") || "";
+    const rawUsed = localStorage.getItem("solace_quote_used_indices");
+    usedIndices = rawUsed ? JSON.parse(rawUsed) : [];
+    const rawCur = localStorage.getItem("solace_quote_current");
+    currentIdx = rawCur ? Number(rawCur) : -1;
+  } catch (e) {
+    usedIndices = [];
+    currentIdx = -1;
+  }
+
+  // 同一天：直接返回上次选中的那条
+  if (lastDate === today && currentIdx >= 0 && currentIdx < TOTAL_QUOTES) {
+    return { quote: ALL_QUOTES[currentIdx], idx: currentIdx };
+  }
+
+  // 跨天：从未使用过的索引里随机选一条
+  let available = [];
+  for (let i = 0; i < TOTAL_QUOTES; i++) {
+    if (!usedIndices.includes(i)) available.push(i);
+  }
+  // 全部用过：清空已使用列表，重新开始
+  if (available.length === 0) {
+    available = Array.from({ length: TOTAL_QUOTES }, (_, i) => i);
+    usedIndices = [];
+  }
+  const picked = available[Math.floor(Math.random() * available.length)];
+  usedIndices.push(picked);
+
+  try {
+    localStorage.setItem("solace_quote_last_date", today);
+    localStorage.setItem("solace_quote_used_indices", JSON.stringify(usedIndices));
+    localStorage.setItem("solace_quote_current", String(picked));
+  } catch (e) {}
+
+  return { quote: ALL_QUOTES[picked], idx: picked };
+}
+
 /* ================= 组件 ================= */
 
 export default function HealingCottage() {
@@ -145,10 +208,138 @@ export default function HealingCottage() {
     gad7: null,
   });
 
+  // 测评历史弹窗
+  const [historyModal, setHistoryModal] = useState({
+    open: false,
+    type: "personality", // personality | emotion
+    records: [],
+    loading: false,
+    selectMode: false,   // 多选模式
+    selectedIds: [],     // 已勾选的记录 id
+    deleting: false,     // 删除请求进行中
+    confirmOpen: false,  // 删除二次确认
+    msg: "",             // 行内错误提示（不用 alert）
+  });
+  const historyModalRef = useRef(null);
+
   // 进入页面时读取历史结果
   useEffect(() => {
     setHistory(loadHistory());
   }, []);
+
+  // 每日心理学名言：首次加载选一条，跨天自动刷新
+  const [todayQuote, setTodayQuote] = useState(null);
+  useEffect(() => {
+    setTodayQuote(pickTodayQuote().quote);
+    // 每分钟检查一次日期，跨天则刷新名言
+    const timer = setInterval(() => {
+      const lastDate = (() => {
+        try { return localStorage.getItem("solace_quote_last_date") || ""; } catch { return ""; }
+      })();
+      if (lastDate !== todayStr()) {
+        setTodayQuote(pickTodayQuote().quote);
+      }
+    }, 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  /* ---------- 测评历史（后端持久化） ---------- */
+
+  // 提交一条测评结果到后端（静默失败，不阻断用户流程）
+  async function submitAssessment(type, data) {
+    try {
+      await fetch("/api/user/assessments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type, data }),
+      });
+    } catch {
+      // 静默失败：网络异常或未登录时不上报，不影响测评体验
+    }
+  }
+
+  // 打开历史弹窗：拉取指定类型的后端记录
+  async function openHistory(type) {
+    const blank = {
+      open: true,
+      type,
+      records: [],
+      loading: true,
+      selectMode: false,
+      selectedIds: [],
+      deleting: false,
+      confirmOpen: false,
+      msg: "",
+    };
+    setHistoryModal(blank);
+    try {
+      const res = await fetch(`/api/user/assessments?type=${type}`, { cache: "no-store" });
+      const json = await res.json();
+      const records = json.ok && Array.isArray(json.records) ? json.records : [];
+      setHistoryModal({ ...blank, records, loading: false });
+    } catch {
+      setHistoryModal({ ...blank, records: [], loading: false });
+    }
+  }
+
+  // 开关多选模式：进入时清空已选、退出时收起确认条
+  function toggleSelectMode() {
+    setHistoryModal((m) => ({
+      ...m,
+      selectMode: !m.selectMode,
+      selectedIds: [],
+      confirmOpen: false,
+      msg: "",
+    }));
+  }
+
+  // 勾选 / 取消勾选一条记录
+  function toggleSelectRecord(id) {
+    setHistoryModal((m) => ({
+      ...m,
+      msg: "",
+      selectedIds: m.selectedIds.includes(id)
+        ? m.selectedIds.filter((x) => x !== id)
+        : [...m.selectedIds, id],
+    }));
+  }
+
+  // 全选 / 取消全选
+  function toggleSelectAll() {
+    setHistoryModal((m) => {
+      const all = m.records.length > 0 && m.selectedIds.length === m.records.length;
+      return { ...m, selectedIds: all ? [] : m.records.map((r) => r.id) };
+    });
+  }
+
+  // 删除已选记录：确认后批量删除，成功即从列表移除并退出多选
+  async function deleteSelectedRecords() {
+    const ids = historyModal.selectedIds;
+    if (!ids.length) return;
+    setHistoryModal((m) => ({ ...m, deleting: true, confirmOpen: false, msg: "" }));
+    try {
+      const res = await fetch("/api/user/assessments", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || "删除失败");
+      setHistoryModal((m) => ({
+        ...m,
+        records: m.records.filter((r) => !ids.includes(r.id)),
+        selectedIds: [],
+        selectMode: false,
+        deleting: false,
+      }));
+    } catch {
+      setHistoryModal((m) => ({
+        ...m,
+        deleting: false,
+        msg: "删除失败，请重试",
+      }));
+    }
+  }
 
   /* ---------- 性格倾向探索 ---------- */
 
@@ -165,11 +356,13 @@ export default function HealingCottage() {
     setPAnswers(next);
     if (pStep === P_QUESTIONS.length - 1) {
       // 计算 4 维度倾向：每维度 6 题，A 计数 >= 4 取 A 字母
+      const countArr = [0, 0, 0, 0]; // 各维度 A 选项数
       const letters = P_DIM_LETTERS.map((pair, di) => {
         let countA = 0;
         for (let i = 0; i < 6; i++) {
           if (next[di * 6 + i] === "A") countA++;
         }
+        countArr[di] = countA;
         return countA >= 4 ? pair[0] : pair[1];
       });
       const type = letters.join("");
@@ -181,6 +374,14 @@ export default function HealingCottage() {
       } catch (e) {}
       setPResult(result);
       setHistory((h) => ({ ...h, personality: result }));
+      // 提交到后端：存 type + 四个维度的 A 选项占比（I/N/T/J 方向的百分比）
+      submitAssessment("personality", {
+        type,
+        I: Math.round((countArr[0] / 6) * 100),
+        N: Math.round((countArr[1] / 6) * 100),
+        T: Math.round((countArr[2] / 6) * 100),
+        J: Math.round((countArr[3] / 6) * 100),
+      });
     } else {
       setTimeout(() => setPStep(pStep + 1), 180);
     }
@@ -216,6 +417,8 @@ export default function HealingCottage() {
       } catch (e) {}
       setMResult({ phq: pRes, gad: gRes });
       setHistory((h) => ({ ...h, phq9: pRes, gad7: gRes }));
+      // 提交到后端：存 PHQ-9 和 GAD-7 两个分数
+      submitAssessment("emotion", { phq9: phq, gad7: gad });
     } else {
       setTimeout(() => setMStep(mStep + 1), 180);
     }
@@ -507,6 +710,12 @@ export default function HealingCottage() {
           >
             {history.personality ? "重新测试" : "开始测试"}
           </button>
+          <button
+            onClick={() => openHistory("personality")}
+            className="mt-2 text-xs text-[#5b8aa6] hover:text-[#7fa8c4] transition-colors duration-150"
+          >
+            查看历史记录
+          </button>
         </div>
 
         {/* 情绪状态自评 */}
@@ -549,8 +758,289 @@ export default function HealingCottage() {
           >
             {history.phq9 || history.gad7 ? "重新测试" : "开始测试"}
           </button>
+          <button
+            onClick={() => openHistory("emotion")}
+            className="mt-2 text-xs text-[#5b8aa6] hover:text-[#7fa8c4] transition-colors duration-150"
+          >
+            查看历史记录
+          </button>
         </div>
       </div>
+
+      {/* 每日心理学名言 */}
+      {todayQuote && (
+        <div className="bg-[#fdf6f0] rounded-2xl shadow-sm border border-[#f0e6d8] px-6 py-6 text-center">
+          <div className="flex items-center justify-center gap-2 mb-3">
+            <span className="h-px w-8 bg-[#e8d5c0]" />
+            <span className="text-lg">✦</span>
+            <span className="h-px w-8 bg-[#e8d5c0]" />
+          </div>
+          <p
+            className="text-[17px] leading-[1.8] text-[#C98BA4] font-medium"
+            style={{ textShadow: "0 1px 2px rgba(201,139,164,0.08)" }}
+          >
+            {todayQuote.text}
+          </p>
+          <p className="text-[13px] text-[#a87c8e] mt-3">
+            —— {todayQuote.author}
+          </p>
+        </div>
+      )}
+
+      {/* 测评历史弹窗 */}
+      {historyModal.open && (
+        <>
+          <style>{`
+            @keyframes hc-veil-in { from { opacity: 0 } to { opacity: 1 } }
+            @keyframes hc-card-in {
+              from { opacity: 0; transform: translateY(12px) scale(0.985) }
+              to { opacity: 1; transform: translateY(0) scale(1) }
+            }
+          `}</style>
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            style={{
+              // 暖色调遮罩（不用纯黑）：中心稍亮、四周压暗形成聚光，
+              // 与米白/淡蓝的界面气质衔接，弹窗边界更清楚
+              background:
+                "radial-gradient(125% 105% at 50% 12%, rgba(58,68,74,0.30) 0%, rgba(30,38,43,0.56) 100%)",
+              backdropFilter: "blur(8px) saturate(0.98)",
+              WebkitBackdropFilter: "blur(8px) saturate(0.98)",
+              animation: "hc-veil-in 180ms ease-out both",
+            }}
+            onClick={() =>
+              setHistoryModal((m) => ({ ...m, open: false, confirmOpen: false }))
+            }
+          >
+            <div
+              className="bg-[#fbfaf7] rounded-2xl border border-[#e8eae7] w-[92%] max-w-lg max-h-[82vh] flex flex-col overflow-hidden"
+              style={{
+                boxShadow:
+                  "0 28px 70px -24px rgba(38,48,54,0.55), 0 2px 8px rgba(38,48,54,0.08)",
+                animation: "hc-card-in 220ms cubic-bezier(0.22,1,0.36,1) both",
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* 标题栏 */}
+              <div className="flex items-center justify-between px-5 py-4 border-b border-[#e8eae7]">
+                <h3 className="text-base font-bold text-slate-800">
+                  {historyModal.type === "personality" ? "性格倾向历史" : "情绪自评历史"}
+                </h3>
+                <div className="flex items-center gap-1">
+                  {historyModal.records.length > 0 && (
+                    <button
+                      onClick={toggleSelectMode}
+                      className="text-xs text-[#5b8aa6] hover:text-[#3f6d8a] px-2.5 py-1.5 rounded-md hover:bg-[#eef4f8] active:scale-[0.98] transition-all duration-150"
+                    >
+                      {historyModal.selectMode ? "取消" : "多选"}
+                    </button>
+                  )}
+                  <button
+                    onClick={() =>
+                      setHistoryModal((m) => ({ ...m, open: false, confirmOpen: false }))
+                    }
+                    className="text-slate-400 hover:text-slate-600 text-lg leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-[#eef4f8] transition-colors"
+                  >
+                    ×
+                  </button>
+                </div>
+              </div>
+
+              {/* 列表 */}
+              <div className="flex-1 overflow-y-auto px-5 py-4">
+                {historyModal.loading ? (
+                  <p className="text-sm text-slate-400 text-center py-8">加载中…</p>
+                ) : historyModal.records.length === 0 ? (
+                  <p className="text-sm text-slate-400 text-center py-8">
+                    还没有记录，做完一次测评后就会出现在这里。
+                  </p>
+                ) : (
+                  <div className="space-y-3">
+                    {historyModal.records.map((r, idx) => {
+                      const d = r.data || {};
+                      const dateStr = formatRecordDate(r.created_at);
+                      const prev = idx < historyModal.records.length - 1
+                        ? historyModal.records[idx + 1]?.data
+                        : null;
+                      const selected = historyModal.selectedIds.includes(r.id);
+                      return (
+                        <div
+                          key={r.id}
+                          onClick={
+                            historyModal.selectMode
+                              ? () => toggleSelectRecord(r.id)
+                              : undefined
+                          }
+                          className={`rounded-xl border px-4 py-3 transition-all duration-150 ${
+                            historyModal.selectMode
+                              ? selected
+                                ? "cursor-pointer border-[#7fa8c4] bg-[#f3f8fb] ring-1 ring-[#7fa8c4]/25"
+                                : "cursor-pointer border-[#e8eae7] bg-white hover:border-[#c7d8e3] hover:bg-[#fafcfd]"
+                              : "border-[#e8eae7] bg-white"
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            {historyModal.selectMode && (
+                              <span
+                                className={`mt-0.5 w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center shrink-0 transition-all duration-150 ${
+                                  selected
+                                    ? "border-[#7fa8c4] bg-[#7fa8c4]"
+                                    : "border-[#cfd8dd] bg-white"
+                                }`}
+                              >
+                                {selected && (
+                                  <svg
+                                    className="w-3 h-3 text-white"
+                                    viewBox="0 0 24 24"
+                                    fill="none"
+                                    stroke="currentColor"
+                                    strokeWidth="3.5"
+                                  >
+                                    <path
+                                      d="M20 6L9 17l-5-5"
+                                      strokeLinecap="round"
+                                      strokeLinejoin="round"
+                                    />
+                                  </svg>
+                                )}
+                              </span>
+                            )}
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs text-slate-400 mb-2">{dateStr}</p>
+                              {historyModal.type === "personality" ? (
+                                <PersonalityRecord data={d} />
+                              ) : (
+                                <EmotionRecord data={d} prev={prev} />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* 行内错误提示（不使用 alert） */}
+              {historyModal.msg && (
+                <div className="px-5 py-2 border-t border-[#f0d9d0] bg-[#fdf4f0]">
+                  <p className="text-xs text-[#c0653f]">{historyModal.msg}</p>
+                </div>
+              )}
+
+              {/* 多选操作栏 */}
+              {historyModal.selectMode && (
+                <div className="px-5 py-3 border-t border-[#e8eae7] bg-[#faf9f6] flex items-center gap-3">
+                  <button
+                    onClick={toggleSelectAll}
+                    className="text-xs text-[#5b8aa6] hover:text-[#3f6d8a] transition-colors"
+                  >
+                    {historyModal.records.length > 0 &&
+                    historyModal.selectedIds.length === historyModal.records.length
+                      ? "取消全选"
+                      : "全选"}
+                  </button>
+                  <span className="text-xs text-slate-400">
+                    已选 {historyModal.selectedIds.length} 条
+                  </span>
+                  <button
+                    onClick={() =>
+                      setHistoryModal((m) => ({ ...m, confirmOpen: true, msg: "" }))
+                    }
+                    disabled={historyModal.selectedIds.length === 0 || historyModal.deleting}
+                    className="ml-auto border border-[#e8b4a0] bg-[#f5b8a0] text-white rounded-lg px-3.5 py-1.5 text-xs hover:bg-[#f0a48a] active:scale-[0.98] shadow-sm transition-all duration-150 disabled:opacity-45 disabled:cursor-not-allowed disabled:active:scale-100"
+                  >
+                    {historyModal.deleting ? "删除中…" : "删除"}
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* 删除二次确认（自定义弹窗，替代 window.confirm） */}
+          <ConfirmModal
+            open={historyModal.confirmOpen}
+            message={`确定删除选中的 ${historyModal.selectedIds.length} 条测评记录吗？删除后无法恢复。`}
+            confirmText={historyModal.deleting ? "删除中…" : "确认删除"}
+            onConfirm={deleteSelectedRecords}
+            onClose={() => setHistoryModal((m) => ({ ...m, confirmOpen: false }))}
+          />
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ================= 历史弹窗子组件 ================= */
+
+// 格式化测评记录日期：YYYY/M/D HH:MM
+function formatRecordDate(s) {
+  if (!s) return "未知时间";
+  const d = new Date(s);
+  if (isNaN(d.getTime())) return String(s);
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// 性格倾向单条记录：展示 4 字母类型 + 四个维度的进度条
+function PersonalityRecord({ data }) {
+  if (!data) return null;
+  const { type, I, N, T, J } = data;
+  const dims = [
+    { label: "I", value: I, pair: "E" },
+    { label: "N", value: N, pair: "S" },
+    { label: "T", value: T, pair: "F" },
+    { label: "J", value: J, pair: "P" },
+  ];
+  return (
+    <div>
+      <p className="text-sm font-bold text-[#5b8aa6] mb-2">{type || "—"}</p>
+      <div className="space-y-1.5">
+        {dims.map((dim) => {
+          const v = typeof dim.value === "number" ? dim.value : 0;
+          return (
+            <div key={dim.label} className="flex items-center gap-2">
+              <span className="text-[11px] text-slate-500 w-6 text-right">{dim.label}</span>
+              <div className="flex-1 h-2 bg-[#f0f3f1] rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-[#7fa8c4] rounded-full"
+                  style={{ width: `${v}%` }}
+                />
+              </div>
+              <span className="text-[11px] text-slate-500 w-6">{dim.pair}</span>
+              <span className="text-[11px] text-slate-600 w-8 text-right tabular-nums">{v}%</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// 情绪自评单条记录：展示两个分数 + 与上次的趋势
+function EmotionRecord({ data, prev }) {
+  if (!data) return null;
+  const { phq9, gad7 } = data;
+  const items = [
+    { label: "PHQ-9", value: phq9, prev: prev?.phq9 },
+    { label: "GAD-7", value: gad7, prev: prev?.gad7 },
+  ];
+  return (
+    <div className="flex gap-4">
+      {items.map((it) => {
+        const v = typeof it.value === "number" ? it.value : 0;
+        const p = typeof it.prev === "number" ? it.prev : null;
+        const diff = p !== null ? v - p : null;
+        const trend = diff === null ? "" : diff > 0 ? "↑" : diff < 0 ? "↓" : "—";
+        const trendColor = diff === null ? "text-slate-300" : diff > 0 ? "text-[#bb6353]" : diff < 0 ? "text-[#5b8aa6]" : "text-slate-300";
+        return (
+          <div key={it.label} className="flex-1 flex items-baseline gap-2">
+            <span className="text-xs text-slate-500">{it.label}</span>
+            <span className="text-lg font-bold text-slate-800 tabular-nums">{v}</span>
+            <span className="text-[11px] text-slate-400">分</span>
+            {trend && <span className={`text-xs ${trendColor}`}>{trend}</span>}
+          </div>
+        );
+      })}
     </div>
   );
 }

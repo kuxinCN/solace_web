@@ -15,7 +15,7 @@ export default function BioModal({
 
   return (
     <div
-      className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+      className="modal-fade fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={onClose}
     >
       <div
@@ -42,14 +42,14 @@ export default function BioModal({
           <button
             onClick={onClose}
             disabled={saving}
-            className="border border-[#d5d9d7] bg-[#f1f3f2] text-slate-500 rounded-lg px-4 py-1.5 text-sm hover:bg-[#e8eff2] transition-all duration-150 disabled:opacity-50"
+            className="border border-[#d5d9d7] bg-[#f1f3f2] text-slate-500 rounded-lg px-4 py-1.5 text-sm hover:bg-[#e8eff2] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:hover:scale-100"
           >
             取消
           </button>
           <button
             onClick={onSave}
             disabled={saving}
-            className="border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-lg px-4 py-1.5 text-sm hover:bg-[#6d99b5] active:scale-[0.98] transition-all duration-150 disabled:opacity-50"
+            className="border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-lg px-4 py-1.5 text-sm hover:bg-[#6d99b5] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:hover:scale-100"
           >
             {saving ? "保存中..." : "保存"}
           </button>

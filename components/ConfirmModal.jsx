@@ -15,7 +15,7 @@ export default function ConfirmModal({
 
   return (
     <div
-      className="fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
+      className="modal-fade fixed inset-0 bg-black/30 backdrop-blur-sm flex items-center justify-center z-50"
       onClick={onClose}
     >
       <div
@@ -28,7 +28,7 @@ export default function ConfirmModal({
         <div className="flex gap-2 justify-end">
           <button
             onClick={onClose}
-            className="border border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 rounded-lg px-4 py-2 text-sm hover:bg-[#eef1f2] hover:text-slate-700 active:scale-[0.98] transition-all duration-150"
+            className="border border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 rounded-lg px-4 py-2 text-sm hover:bg-[#eef1f2] hover:text-slate-700 hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
           >
             {cancelText}
           </button>

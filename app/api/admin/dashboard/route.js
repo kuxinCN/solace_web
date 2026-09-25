@@ -107,14 +107,27 @@ export async function GET(request) {
             GROUP BY mood
             ORDER BY n DESC`
         ),
+        // ⚠️ 这条以前是 600-700ms 的慢查询，别改回去：
+        //    原来写成 `users JOIN messages ... GROUP BY 4 个字段 ORDER BY COUNT(m.id)` ——
+        //    MySQL 得先把两个表 JOIN 起来，再分组、再排序；
+        //    而 WHERE 只有 created_at，messages 上没有以 created_at 开头的索引，
+        //    于是「全表扫 + 临时表 + 文件排序」三件事一起发生。
+        //
+        //    现在改成「先在 messages 上聚合出前 5 名，再 JOIN 用户表」：
+        //      · 聚合阶段只碰 messages 一张表，能吃到 idx_msg_created_user 覆盖索引
+        //      · JOIN 阶段只处理 5 行
         query(
-          `SELECT u.id, u.email, u.username, u.avatar_url, COUNT(m.id) AS messageCount
-             FROM users u
-             JOIN messages m ON m.user_id = u.id
-            WHERE m.created_at >= ${since}
-            GROUP BY u.id, u.email, u.username, u.avatar_url
-            ORDER BY messageCount DESC
-            LIMIT 5`
+          `SELECT u.id, u.email, u.username, u.avatar_url, t.cnt AS messageCount
+             FROM (
+               SELECT user_id, COUNT(*) AS cnt
+                 FROM messages
+                WHERE created_at >= ${since}
+                GROUP BY user_id
+                ORDER BY cnt DESC
+                LIMIT 5
+             ) t
+             JOIN users u ON u.id = t.user_id
+            ORDER BY t.cnt DESC`
         ),
       ]);
 

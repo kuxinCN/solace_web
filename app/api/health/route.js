@@ -17,6 +17,23 @@ import { testConnection } from "@/lib/db";
 export const dynamic = "force-dynamic";
 
 export async function GET() {
+  // ⚠️ 数据审核的自动定时器在这里「懒启动」一次。
+  //
+  // 为什么选 health 接口：它会被外部监控（UptimeRobot 之类）定期打，
+  // 所以即使没人打开后台，定时器也能自然起来。内部是幂等的，
+  // 重复调用只做一次判断，开销可以忽略。
+  //
+  // 为什么不用 instrumentation.js 在应用启动时注册：
+  //   Next 会给 server / edge 两套环境各编译一次 instrumentation，
+  //   webpack 顺着 scheduler → settings → db 会解析到 node:path，
+  //   而 edge 没有这个模块 → 整个 npm run build 失败（已经踩过一次）。
+  try {
+    const { startReviewScheduler } = await import("@/lib/scheduler");
+    startReviewScheduler();
+  } catch (err) {
+    console.error("[health] 定时器启动失败（不影响健康检查）：", err?.message || err);
+  }
+
   const startedAt = Date.now();
   const result = await testConnection();
 

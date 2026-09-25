@@ -1,6 +1,7 @@
 /** 聊天消息：按会话读取 / 追加一条 / 删除一条（「重新生成」会用到删除） */
 import { describeDbError, execute, query } from "@/lib/db";
 import { ensureUserColumnsOnce } from "@/lib/schema";
+import { pushToTrash } from "@/lib/trash";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody, toMysqlDateTime } from "@/lib/util";
 
@@ -8,6 +9,9 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const MAX_CONTENT_CHARS = 20000;
+// 一次最多返回多少条消息：对话攒到几千条时，全量返回会让响应变得很大。
+// 先按 id 倒序取最新一批，再翻回正序返回，前端看到的仍是"最新 N 条、按时间正序"。
+const MAX_ROWS = 500;
 const ALLOWED_ROLES = ["user", "assistant"];
 const DATETIME_PATTERN = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2})?$/;
 
@@ -38,14 +42,17 @@ export async function GET(request) {
       return jsonError("会话不存在", 404);
     }
 
-    const messages = await query(
+    const recent = await query(
       `SELECT id, conversation_id, user_id, role, content, created_at
          FROM messages
         WHERE conversation_id = ? AND user_id = ?
-        ORDER BY id ASC`,
+        ORDER BY id DESC
+        LIMIT ${MAX_ROWS}`,
       [conversationId, user.id]
     );
-    return json({ ok: true, messages });
+    // 倒序取完翻回正序，前端渲染逻辑不用改
+    const messages = recent.reverse();
+    return json({ ok: true, messages, limited: recent.length >= MAX_ROWS });
   } catch (err) {
     return jsonError(describeDbError(err), 500);
   }
@@ -71,7 +78,11 @@ export async function POST(request) {
       : toMysqlDateTime(new Date());
 
   try {
-    await ensureUserColumnsOnce();
+    try {
+      await ensureUserColumnsOnce();
+    } catch {
+      /* 补列失败不影响发消息 */
+    }
 
     if (!(await ownsConversation(conversationId, user.id))) {
       return jsonError("会话不存在", 404);
@@ -110,10 +121,34 @@ export async function DELETE(request) {
   const user = await getCurrentUser(request);
   if (!user) return jsonError("请先登录", 401);
 
-  const id = parseId(new URL(request.url).searchParams.get("id"));
+  const url = new URL(request.url);
+  const id = parseId(url.searchParams.get("id"));
+  // ⚠️ ?permanent=1 表示「彻底删除」：不进回收站
+  const permanent = url.searchParams.get("permanent") === "1";
   if (!id) return jsonError("缺少消息 id", 400);
 
   try {
+    // 「删除」：先存进回收站再删（3 天内可以恢复）
+    // ⚠️ ?permanent=1（彻底删除）时跳过这一步
+    try {
+      if (permanent) throw new Error("skip-trash");
+      const rows = await query(
+        `SELECT id, conversation_id, role, content, created_at FROM messages
+          WHERE id = ? AND user_id = ? LIMIT 1`,
+        [id, user.id]
+      );
+      if (rows.length) {
+        await pushToTrash({
+          userId: user.id,
+          itemType: "message",
+          title: String(rows[0].content || "").slice(0, 40) || "一条消息",
+          payload: rows[0],
+        });
+      }
+    } catch {
+      /* 忽略 */
+    }
+
     const result = await execute("DELETE FROM messages WHERE id = ? AND user_id = ?", [
       id,
       user.id,

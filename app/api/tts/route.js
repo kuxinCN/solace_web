@@ -4,10 +4,10 @@
  *   new Audio(URL.createObjectURL(await res.blob())).play();
  * 配置来自后台「TTS」页面。需要用户端已登录。
  */
-import { requestSpeech } from "@/lib/ai";
+import { requestSpeech, prewarmConnections } from "@/lib/ai";
 import { rateLimit } from "@/lib/rate-limit";
 import { getCurrentUser } from "@/lib/user-auth";
-import { cleanString, clientIp, jsonError } from "@/lib/util";
+import { cleanString, clientIp, jsonError, stripEmoji } from "@/lib/util";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -34,12 +34,23 @@ export async function POST(request) {
     return jsonError("请求体不是合法 JSON", 400);
   }
 
+  // 预热模式：只建立到上游 TTS 的连接，不真正合成（前端发消息时提前调用，降低首句 TTS 延迟）
+  if (payload.prewarm === true) {
+    prewarmConnections({ tts: true });
+    return Response.json({ ok: true, warmed: true });
+  }
+
   const text = cleanString(payload.text, 1000);
   const voice = cleanString(payload.voice, 64);
 
   if (!text) return jsonError("要合成的文字不能为空", 400);
 
-  const result = await requestSpeech({ text, voice });
+  // TTS 专用副本：移除 emoji（😊 会被 MiMo 读成“笑脸”），不改动前端的原始数据。
+  // 纯 emoji 内容净化后为空，直接返回，避免白调一次上游。
+  const speakText = stripEmoji(text);
+  if (!speakText) return jsonError("要合成的文字不能为空", 400);
+
+  const result = await requestSpeech({ text: speakText, voice });
   if (!result.ok) return jsonError(result.error, 400);
 
   return new Response(result.buffer, {

@@ -1,8 +1,11 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import NicknameEditor from "@/components/NicknameEditor";
 import ImageCropper from "@/components/ImageCropper";
+import TrashModal from "@/components/TrashModal";
+import ChangePasswordModal from "@/components/ChangePasswordModal";
+import { useAvatarUpload } from "@/lib/use-avatar-upload";
 
 async function apiRequest(path, options = {}) {
   const res = await fetch(path, {
@@ -63,6 +66,7 @@ export default function ProfileView({
   onSaved,
   onSignOut,
   hideSignOut,
+  hideAvatar,
   bioValue,
   onBioChange,
   onSaveBio,
@@ -71,12 +75,18 @@ export default function ProfileView({
 }) {
   const [gender, setGender] = useState(profile?.gender || "");
   const [birthday, setBirthday] = useState(profile?.birthday || "");
-  const [avatarUrl, setAvatarUrl] = useState(profile?.avatar_url || "");
+  const [persona, setPersona] = useState(profile?.ai_persona || "");
+  const [dangerBusy, setDangerBusy] = useState("");
+  // 修改密码弹窗（五项校验 + 邮箱验证码）
+  const [pwdAsk, setPwdAsk] = useState(false);
+  // 绑定邮箱：给修改密码弹窗做掩码提示用；拿不到也不影响（弹窗里能自己填）
+  const boundEmail = String(user?.email || "");
+  // 注销账号确认弹窗（自定义，不用 window.prompt）
+  const [dangerAsk, setDangerAsk] = useState(false);
+  const [dangerInput, setDangerInput] = useState("");
+  const [trashOpen, setTrashOpen] = useState(false);
   const [savingProfile, setSavingProfile] = useState(false);
-  const [avatarUploading, setAvatarUploading] = useState(false);
   const [msg, setMsg] = useState("");
-  // 待裁剪原图 dataURL；非空时弹出裁剪弹窗
-  const [cropSrc, setCropSrc] = useState(null);
 
   // 邮箱修改
   const [emailEditing, setEmailEditing] = useState(false);
@@ -88,54 +98,23 @@ export default function ProfileView({
   const [newPwd, setNewPwd] = useState("");
   const [pwdLoading, setPwdLoading] = useState(false);
 
-  const fileRef = useRef(null);
+  // 头像上传：复用共享 hook
+  const avatar = useAvatarUpload({
+    kind: "avatar",
+    initialUrl: profile?.avatar_url || "",
+    onSaved: () => {
+      setMsg("头像更新成功");
+      onSaved?.();
+    },
+    onError: (text) => setMsg(text),
+  });
 
   // profile 变化时同步本地状态
   useEffect(() => {
     setGender(profile?.gender || "");
     setBirthday(profile?.birthday || "");
-    setAvatarUrl(profile?.avatar_url || "");
+    setPersona(profile?.ai_persona || "");
   }, [profile]);
-
-  // 选择图片：校验后读出原图 dataURL，弹出裁剪弹窗（不立即上传）
-  function handleAvatarChange(e) {
-    const file = e.target.files?.[0];
-    e.target.value = "";
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      setMsg("请选择图片文件");
-      return;
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      setMsg("图片不能超过 5MB");
-      return;
-    }
-    setMsg("");
-    const reader = new FileReader();
-    reader.onload = () => setCropSrc(reader.result);
-    reader.onerror = () => setMsg("图片读取失败");
-    reader.readAsDataURL(file);
-  }
-
-  // 裁剪确认：上传裁剪结果，实时预览
-  async function handleAvatarCropped(dataUrl) {
-    setAvatarUploading(true);
-    setMsg("");
-    try {
-      const { url } = await apiRequest("/api/user/upload", {
-        method: "POST",
-        body: { kind: "avatar", dataUrl },
-      });
-      setAvatarUrl(url);
-      setMsg("头像更新成功");
-      setCropSrc(null);
-      onSaved?.();
-    } catch (err) {
-      setMsg("头像上传失败：" + err.message);
-    } finally {
-      setAvatarUploading(false);
-    }
-  }
 
   // 保存性别和生日（保存前校验生日合法性）
   async function handleSaveProfile() {
@@ -194,7 +173,7 @@ export default function ProfileView({
       "solace_login_hint",
       "邮箱已修改，请用新邮箱重新登录"
     );
-    window.location.href = "/";
+    window.location.href = "/login";
   }
 
   // 修改密码：成功后提示，不退出登录
@@ -220,43 +199,107 @@ export default function ProfileView({
     }
   }
 
+  // 切换 AI 人格：点一下立即保存（这是高频操作，不再让用户点第二次按钮）
+  async function handlePickPersona(next) {
+    if (next === persona) return;
+    setPersona(next);
+    setMsg("");
+    try {
+      await apiRequest("/api/user/profile", {
+        method: "PUT",
+        body: { aiPersona: next },
+      });
+      setMsg(next === "male" ? 'AI 提示词已切换为「他」' : 'AI 提示词已切换为「她」');
+      onSaved?.();
+    } catch (err) {
+      setPersona(profile?.ai_persona || "");
+      setMsg("切换失败：" + err.message);
+    }
+  }
+
+  /**
+   * 回收站弹窗用的请求函数：自动带 Cookie，非 2xx 时抛错。
+   * 单独定义一个，是为了让 TrashModal 不用关心 fetch 细节。
+   */
+  const trashRequest = useCallback(async (url, options = {}) => {
+    const res = await fetch(url, {
+      method: options.method || "GET",
+      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) throw new Error(data?.error || `请求失败（HTTP ${res.status}）`);
+    return data || {};
+  }, []);
+
+  // 导出我的数据：GET 请求会自动带 Cookie 并触发浏览器下载，不用处理响应
+  function handleExportData() {
+    window.open("/api/user/export", "_blank");
+  }
+
+  /** 点「注销账号」：打开自定义确认弹窗（和站内其他确认框风格一致，不用 window.prompt） */
+  function handleDeleteAccount() {
+    setDangerAsk(true);
+    setDangerInput("");
+    setMsg("");
+  }
+
+  /** 真正执行注销 */
+  async function performDeleteAccount() {
+    const word = "注销我的账号";
+    if (dangerInput.trim() !== word) {
+      setMsg(`请准确输入「${word}」再确认`);
+      return;
+    }
+    setDangerBusy("delete");
+    setMsg("");
+    try {
+      await apiRequest("/api/user/account", {
+        method: "DELETE",
+        body: { confirm: word },
+      });
+      sessionStorage.setItem("solace_login_hint", "账号已注销，感谢你曾经来过");
+      window.location.href = "/login";
+    } catch (err) {
+      setMsg("注销失败：" + err.message);
+      setDangerBusy("");
+    }
+  }
+
   return (
     <div className="flex flex-col">
-      {/* 头像 */}
-      <div className="flex flex-col items-center pb-3 border-b border-[#e8eae7]">
-        <button
-          onClick={() => !avatarUploading && fileRef.current?.click()}
-          className="relative w-20 h-20 rounded-full overflow-hidden border border-[#d5d9d7] hover:opacity-80 transition-opacity"
-          title="点击更换头像"
-        >
-          {avatarUrl ? (
-            <img
-              src={avatarUrl}
-              alt="头像"
-              className="w-full h-full object-cover"
-            />
-          ) : (
-            <div className="w-full h-full bg-gradient-to-br from-[#b6cdd9] to-[#9db5c3] flex items-center justify-center text-white text-2xl font-bold">
-              {(profile?.username || user?.email || "我")
-                .charAt(0)
-                .toUpperCase()}
-            </div>
-          )}
-          {avatarUploading && (
-            <div className="absolute inset-0 bg-black/40 flex items-center justify-center text-white text-xs">
-              上传中
-            </div>
-          )}
-        </button>
-        <p className="text-xs text-slate-400 mt-2">点击头像可更换</p>
-        <input
-          ref={fileRef}
-          type="file"
-          accept="image/*"
-          onChange={handleAvatarChange}
-          className="hidden"
-        />
-      </div>
+      {/* 头像（设置页用 hideAvatar 隐藏，改由封面头像入口承担） */}
+      {!hideAvatar && (
+        <div className="flex flex-col items-center pb-3 border-b border-[#e8eae7]">
+          <button
+            onClick={avatar.openPicker}
+            className="relative w-20 h-20 rounded-full overflow-hidden border border-[#d5d9d7] hover:opacity-80 transition-opacity"
+            title="点击更换头像"
+          >
+            {avatar.avatarUrl ? (
+              <img
+                src={avatar.avatarUrl}
+                alt="头像"
+                className="w-full h-full object-cover"
+              />
+            ) : (
+              <div className="w-full h-full bg-gradient-to-br from-[#b6cdd9] to-[#9db5c3] flex items-center justify-center text-white text-2xl font-bold">
+                {(profile?.username || user?.email || "我")
+                  .charAt(0)
+                  .toUpperCase()}
+              </div>
+            )}
+          </button>
+          <p className="text-xs text-slate-400 mt-2">点击头像可更换</p>
+          <input
+            ref={avatar.fileRef}
+            type="file"
+            accept="image/*"
+            onChange={avatar.handleFileChange}
+            className="hidden"
+          />
+        </div>
+      )}
 
       {/* 昵称：复用 NicknameEditor */}
       <div className="pb-3 border-b border-[#e8eae7]">
@@ -312,6 +355,40 @@ export default function ProfileView({
           <option value="女">女</option>
           <option value="保密">保密</option>
         </select>
+      </div>
+
+      {/* AI 提示词性别：两个选项直接切换，选完立即保存 */}
+      {/* ⚠️ 这是给 AI「提示词」选的性别，和用户本人的性别完全无关 */}
+      <div className="pb-3 border-b border-[#e8eae7]">
+        <label className="block text-sm text-gray-600 mb-1">AI 提示词性别</label>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => handlePickPersona("female")}
+            className={`flex-1 p-2 rounded-lg border text-sm transition-colors ${
+              persona === "female"
+                ? "border-[#a9c6da] bg-[#e3edf3] text-slate-800 font-medium"
+                : "border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 hover:bg-[#f1f5f7]"
+            }`}
+          >
+            她（温柔的女性朋友）
+          </button>
+          <button
+            type="button"
+            onClick={() => handlePickPersona("male")}
+            className={`flex-1 p-2 rounded-lg border text-sm transition-colors ${
+              persona === "male"
+                ? "border-[#a9c6da] bg-[#e3edf3] text-slate-800 font-medium"
+                : "border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 hover:bg-[#f1f5f7]"
+            }`}
+          >
+            他（温和的男性朋友）
+          </button>
+        </div>
+        <p className="text-xs text-slate-400 mt-1">
+          这只决定 AI 用什么身份和你说话（决定用哪一份提示词），**和你的性别无关**。
+          选完立即生效，也可以在聊天输入框旁随时切换。
+        </p>
       </div>
 
       {/* 生日 */}
@@ -398,7 +475,7 @@ export default function ProfileView({
           <label className="text-sm text-gray-600">密码</label>
           <button
             onClick={() => {
-              setPwdEditing(!pwdEditing);
+              setPwdAsk(true);
               setMsg("");
             }}
             className="text-xs text-red-500 hover:text-red-700"
@@ -407,37 +484,104 @@ export default function ProfileView({
           </button>
         </div>
         <p className="text-sm text-slate-800 mt-1">******</p>
-        {pwdEditing && (
-          <div className="mt-2 space-y-2">
+        {/* 修改密码已改成弹窗：原密码 + 邮箱验证码 + 两次新密码，见 ChangePasswordModal */}
+      </div>
+
+      {/* 我的数据：回收站 + 导出 */}
+      <div className="pb-3 border-b border-[#e8eae7] mt-3">
+        <label className="block text-sm text-gray-600 mb-2">我的数据</label>
+        <button
+          type="button"
+          onClick={() => setTrashOpen(true)}
+          className={`${btnBase} w-full p-2 text-sm mb-2`}
+        >
+          回收站（删除的内容保留 3 天）
+        </button>
+        <button
+          type="button"
+          onClick={handleExportData}
+          className={`${btnBase} w-full p-2 text-sm`}
+        >
+          导出我的全部数据（JSON）
+        </button>
+        <p className="text-xs text-slate-400 mt-1">
+          下载一份包含你所有对话、消息、日记的文件；密码与图片不包含在内
+        </p>
+      </div>
+
+      {/* 危险操作：注销账号 */}
+      <div className="pb-3 mt-3">
+        <label className="block text-sm text-red-600 mb-2">危险操作</label>
+        <button
+          type="button"
+          onClick={handleDeleteAccount}
+          disabled={dangerBusy === "delete"}
+          className="w-full p-2 text-sm rounded-lg border border-[#e5c9c9] bg-[#fdf6f6] text-red-600 hover:bg-[#fbecec] transition-colors disabled:opacity-50"
+        >
+          {dangerBusy === "delete" ? "注销中..." : "注销账号（删除全部数据）"}
+        </button>
+        <p className="text-xs text-slate-400 mt-1">
+          注销后数据无法恢复，请谨慎操作
+        </p>
+      </div>
+
+      {/* 回收站弹窗 */}
+      <TrashModal open={trashOpen} onClose={() => setTrashOpen(false)} apiRequest={trashRequest} />
+
+      {/* 修改密码弹窗：原密码 / 绑定邮箱 / 验证码 / 新密码 / 重复新密码 */}
+      <ChangePasswordModal
+        open={pwdAsk}
+        onClose={() => setPwdAsk(false)}
+        apiRequest={trashRequest}
+        boundEmail={boundEmail}
+      />
+
+      {/* 注销账号确认弹窗：风格与站内其他确认框保持一致 */}
+      {dangerAsk ? (
+        <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/30 px-6">
+          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+            <h3 className="text-sm font-bold text-red-600">注销账号</h3>
+            <p className="mt-2 text-xs leading-relaxed text-slate-600">
+              注销后，你的账号、全部对话、消息、日记都会被
+              <span className="text-red-500">永久删除，无法恢复</span>。
+            </p>
+            <p className="mt-3 text-xs text-slate-500">
+              如果确定，请准确输入：
+              <span className="ml-1 rounded bg-[#f4f6f5] px-1.5 py-0.5 font-mono text-slate-700">
+                注销我的账号
+              </span>
+            </p>
             <input
-              type="password"
-              value={newPwd}
-              onChange={(e) => setNewPwd(e.target.value)}
-              placeholder="输入新密码（至少 6 位）"
-              className={inputClass}
+              autoFocus
+              value={dangerInput}
+              onChange={(e) => setDangerInput(e.target.value)}
+              className="mt-2 w-full rounded-lg border border-[#d5d9d7] bg-[#fdfdfc] px-3 py-2 text-sm outline-none focus:border-[#a9c6da]"
+              placeholder="在这里输入上面那句话"
             />
-            <div className="flex gap-2">
+            <div className="mt-4 flex justify-end gap-2">
               <button
-                onClick={handleUpdatePassword}
-                disabled={pwdLoading}
-                className={`${btnBase} flex-1 p-2 text-sm`}
-              >
-                {pwdLoading ? "提交中..." : "确认修改"}
-              </button>
-              <button
+                type="button"
+                disabled={dangerBusy === "delete"}
                 onClick={() => {
-                  setPwdEditing(false);
-                  setNewPwd("");
-                  setMsg("");
+                  setDangerAsk(false);
+                  setDangerInput("");
                 }}
-                className={`${btnBase} flex-1 p-2 text-sm`}
+                className="rounded-lg border border-[#d5d9d7] px-3 py-1.5 text-xs text-slate-600 transition-colors hover:bg-[#f2f5f4] disabled:opacity-50"
               >
                 取消
               </button>
+              <button
+                type="button"
+                disabled={dangerBusy === "delete" || dangerInput.trim() !== "注销我的账号"}
+                onClick={performDeleteAccount}
+                className="rounded-lg bg-red-500 px-3 py-1.5 text-xs text-white transition-colors hover:bg-red-600 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {dangerBusy === "delete" ? "注销中…" : "确认注销"}
+              </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      ) : null}
 
       {/* 提示信息 */}
       {msg && (
@@ -457,16 +601,16 @@ export default function ProfileView({
       )}
 
       {/* 头像裁剪弹窗：圆形 1:1 */}
-      {cropSrc && (
+      {avatar.cropSrc && (
         <ImageCropper
-          imageSrc={cropSrc}
+          imageSrc={avatar.cropSrc}
           aspect={1}
           cropShape="round"
           title="裁剪头像"
           maxSide={512}
-          busy={avatarUploading}
-          onCancel={() => setCropSrc(null)}
-          onConfirm={handleAvatarCropped}
+          busy={avatar.uploading}
+          onCancel={() => avatar.setCropSrc(null)}
+          onConfirm={avatar.handleCropped}
         />
       )}
     </div>

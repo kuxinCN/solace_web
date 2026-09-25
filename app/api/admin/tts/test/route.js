@@ -4,7 +4,14 @@
  */
 import { getAdminFromRequest, logAudit } from "@/lib/admin-auth";
 import { requestSpeech } from "@/lib/ai";
-import { cleanString, clientIp, json, jsonError, readJsonBody } from "@/lib/util";
+import {
+  cleanString,
+  clientIp,
+  json,
+  jsonError,
+  readJsonBody,
+  stripEmoji,
+} from "@/lib/util";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -21,7 +28,11 @@ export async function POST(request) {
 
   if (!text) return jsonError("试听文字不能为空", 400);
 
-  const result = await requestSpeech({ text, voice });
+  // 试听同样移除 emoji，避免 MiMo 把表情读成“笑脸”
+  const speakText = stripEmoji(text);
+  if (!speakText) return jsonError("试听文字不能为空", 400);
+
+  const result = await requestSpeech({ text: speakText, voice });
   if (!result.ok) {
     await logAudit({
       adminId: admin.adminId,
@@ -37,7 +48,7 @@ export async function POST(request) {
     adminId: admin.adminId,
     username: admin.username,
     action: "test_tts",
-    detail: `试听 ${text.length} 字`,
+    detail: `试听 ${speakText.length} 字`,
     ip: clientIp(request),
   });
 

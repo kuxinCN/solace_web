@@ -5,6 +5,7 @@
  */
 import { describeDbError, execute, query } from "@/lib/db";
 import { ensureUserColumnsOnce } from "@/lib/schema";
+import { pushToTrash } from "@/lib/trash";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody, toMysqlDateTime } from "@/lib/util";
 
@@ -23,8 +24,13 @@ export async function GET(request) {
   if (!user) return jsonError("请先登录", 401);
 
   try {
-    // 老部署升级时自动补列（pinned / pinned_at / last_message_at），避免 Unknown column
-    await ensureUserColumnsOnce();
+    // 老部署升级时自动补列（pinned / pinned_at / last_message_at）。
+    // 补列失败不能拖垮接口，否则连会话列表都打不开。
+    try {
+      await ensureUserColumnsOnce();
+    } catch {
+      /* 忽略 */
+    }
 
     const conversations = await query(
       `SELECT id, user_id, title, pinned, pinned_at, created_at, last_message_at
@@ -120,10 +126,39 @@ export async function DELETE(request) {
   const user = await getCurrentUser(request);
   if (!user) return jsonError("请先登录", 401);
 
-  const id = parseId(new URL(request.url).searchParams.get("id"));
+  const url = new URL(request.url);
+  const id = parseId(url.searchParams.get("id"));
+  // ⚠️ ?permanent=1 表示「彻底删除」：不进回收站
+  const permanent = url.searchParams.get("permanent") === "1";
   if (!id) return jsonError("缺少会话 id", 400);
 
   try {
+    // 「删除」：先把对话连同它的消息一起存进回收站（恢复时能整体还原）
+    // ⚠️ ?permanent=1（彻底删除）时跳过这一步
+    try {
+      if (permanent) throw new Error("skip-trash");
+      const convRows = await query(
+        `SELECT id, title, created_at, last_message_at FROM conversations
+          WHERE id = ? AND user_id = ? LIMIT 1`,
+        [id, user.id]
+      );
+      if (convRows.length) {
+        const msgRows = await query(
+          `SELECT id, role, content, created_at FROM messages
+            WHERE conversation_id = ? AND user_id = ? ORDER BY id LIMIT 2000`,
+          [id, user.id]
+        );
+        await pushToTrash({
+          userId: user.id,
+          itemType: "conversation",
+          title: convRows[0].title || "新对话",
+          payload: { ...convRows[0], messages: msgRows },
+        });
+      }
+    } catch {
+      /* 回收站写入失败不阻止删除 */
+    }
+
     // 显式先删消息，不完全依赖外键级联（手工建表时可能没建外键）
     await execute("DELETE FROM messages WHERE conversation_id = ? AND user_id = ?", [id, user.id]);
 
