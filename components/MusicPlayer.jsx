@@ -2,6 +2,7 @@
 
 import { usePathname } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useDraggable } from "@/lib/use-draggable";
 
 /**
  * 背景音乐浮窗（左下角，可收起）
@@ -231,6 +232,27 @@ export default function MusicPlayer() {
     };
   }, [musicConfig.autoPlay, tracks.length, play]);
 
+  // ⚠️ 浮窗的位置交给 useDraggable：**收起成小球时可以拖着换地方**，
+  //    位置记在 localStorage，刷新 / 换页面都还在原地。
+  //    拖动能力在 lib/use-draggable.js，压力读数那个小球用的是同一套。
+  //
+  //    ⚠️ **这两个 hook 必须放在下面那些 `return null` 之前** ——
+  //    放到提前返回之后会**直接违反 Hooks 规则（构建报 Error）**：
+  //    React 要求每次渲染的 hook 调用顺序完全一致，
+  //    而 early return 会让"有歌可播"和"没歌可播"这两种渲染走过的 hook 数量不一样。
+  const ball = useDraggable({
+    storageKey: "solace_music_ball",
+    defaultLeft: 16,
+    defaultBottom: 96,
+  });
+
+  // ⚠️ 面板展开 / 收起时容器尺寸会变（40px ↔ 320px），位置要**重新夹一次边界** ——
+  //    否则"拖到屏幕右边再展开"时，面板会有一部分跑到屏幕外，
+  //    而那时小球已经变成面板了，**用户没东西可拖，位置就卡死了**。
+  useEffect(() => {
+    ball.reclamp();
+  }, [expanded]); // eslint-disable-line react-hooks/exhaustive-deps
+
   if (!data || !musicConfig.enabled) return null;
   // 后台和安装页不显示播放器
   if (pathname?.startsWith("/admin") || pathname?.startsWith("/install")) return null;
@@ -247,7 +269,7 @@ export default function MusicPlayer() {
   const fellBack = musicConfig.source === "netease" && neteaseReachable === false;
 
   return (
-    <div className="fixed left-4 bottom-24 z-40 select-none">
+    <div ref={ball.ref} style={ball.style} className="fixed z-40 select-none">
       <audio
         ref={audioRef}
         src={current?.url ? toPlayableUrl(current.url) : undefined}
@@ -263,13 +285,20 @@ export default function MusicPlayer() {
         loop={tracks.length === 1}
       />
 
-      {/* 收起状态：一个小圆图标 */}
+      {/* 收起状态：一个小圆图标（**可以拖动**） */}
       {!expanded ? (
         <button
+          {...ball.handlers}
           type="button"
-          onClick={() => setExpanded(true)}
-          title="背景音乐"
-          className="w-10 h-10 rounded-full bg-white/90 backdrop-blur border border-[#d5d9d7] shadow-md flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-white transition-colors"
+          onClick={() => {
+            // ⚠️ 刚才是"拖"就不算"点" —— 否则每次挪完位置都会顺手把面板展开
+            if (ball.shouldIgnoreClick()) return;
+            setExpanded(true);
+          }}
+          title="背景音乐（可以拖动）"
+          className={`w-10 h-10 cursor-grab rounded-full bg-white/90 backdrop-blur border border-[#d5d9d7] shadow-md flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-white transition-colors ${
+            ball.dragging ? "cursor-grabbing" : ""
+          }`}
         >
           <span className={playing ? "animate-pulse" : ""}>♪</span>
         </button>

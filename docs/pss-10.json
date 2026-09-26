@@ -1,0 +1,156 @@
+{
+  "id": "pss-10",
+  "name": "知觉压力量表（PSS-10）",
+  "description": "评估过去一个月内的主观压力感知。该量表衡量个体感知到的生活不可预测、不可控制和超负荷的程度。",
+  "version": "1.0",
+  "enabled": true,
+  "source": "Cohen S, Kamarck T, Mermelstein R. A global measure of perceived stress. J Health Soc Behav. 1983;24(4):385-396.",
+
+  "questions": [
+    {
+      "id": 1,
+      "text": "在过去一个月里，你多久因为发生意外的事情而感到心烦意乱？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": false,
+      "dimension": "感知无助"
+    },
+    {
+      "id": 2,
+      "text": "在过去一个月里，你多久感到无法控制生活中重要的事情？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": false,
+      "dimension": "感知无助"
+    },
+    {
+      "id": 3,
+      "text": "在过去一个月里，你多久感到紧张或压力大？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": false,
+      "dimension": "感知无助"
+    },
+    {
+      "id": 4,
+      "text": "在过去一个月里，你多久感到有信心处理自己的个人问题？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": true,
+      "dimension": "感知自我效能"
+    },
+    {
+      "id": 5,
+      "text": "在过去一个月里，你多久感到事情按照你的意愿发展？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": true,
+      "dimension": "感知自我效能"
+    },
+    {
+      "id": 6,
+      "text": "在过去一个月里，你多久发现无法应付所有你必须做的事情？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": false,
+      "dimension": "感知无助"
+    },
+    {
+      "id": 7,
+      "text": "在过去一个月里，你多久能够控制生活中的烦恼？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": true,
+      "dimension": "感知自我效能"
+    },
+    {
+      "id": 8,
+      "text": "在过去一个月里，你多久感到自己掌控了局面？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": true,
+      "dimension": "感知自我效能"
+    },
+    {
+      "id": 9,
+      "text": "在过去一个月里，你多久因为一些无法控制的事情而生气？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": false,
+      "dimension": "感知无助"
+    },
+    {
+      "id": 10,
+      "text": "在过去一个月里，你多久感到困难堆积如山，无法克服？",
+      "options": [
+        { "value": 0, "label": "从不" },
+        { "value": 1, "label": "几乎不" },
+        { "value": 2, "label": "有时" },
+        { "value": 3, "label": "经常" },
+        { "value": 4, "label": "总是" }
+      ],
+      "reverse": false,
+      "dimension": "感知无助"
+    }
+  ],
+
+  "scoring": {
+    "type": "sum",
+    "maxScore": 40,
+    "reverseRule": "4 - value",
+    "reverseItems": [4, 5, 7, 8],
+    "thresholds": [
+      { "min": 0, "max": 13, "level": "低" },
+      { "min": 14, "max": 19, "level": "中" },
+      { "min": 20, "max": 40, "level": "高" }
+    ],
+    "note": "总分越高表示感知压力越大。第4、5、7、8题为反向计分，需先反转后再求和。"
+  },
+
+  "dimensions": ["感知无助", "感知自我效能"]
+}

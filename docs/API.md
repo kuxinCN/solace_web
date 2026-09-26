@@ -256,7 +256,64 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 
 ---
 
-## 附：数据库表（10 张）
+## 八、量表题库与词表
+
+### 用户端 · 量表
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/user/scales` | 列出**已启用**的题库。⚠️ 不下发 `scoring`（计分规则只存服务端），也不返回 `reverse` |
+| `POST` | `/api/user/scales` | 提交答案 → 服务端算分 → 存进 `assessment_results`（`type` = 题库 id）→ 触发画像重算 |
+
+**POST 请求体**：`{ "scaleId": "pss-10", "answers": { "q1": 0, "q2": 3 } }`
+
+⚠️ **逐题校验**：必答 + 取值必须在该题的选项里。答错直接 400，**不会静默算出一个错分数**。
+
+**返回** `{ ok, score, level, dimensions, note }` —— 分数和等级**都由服务端算**，
+所以后台上传新题库之后前端不用改代码就能用。
+
+### 后台 · 题库管理
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/admin/scales` | 列出全部题库（含停用的）+ 格式说明 |
+| `POST` | `/api/admin/scales` | `action`: `upload` / `toggle` / `delete` / `preview` |
+
+- `upload`：支持对象 / 数组 / JSON 字符串，**逐份校验**；`overwrite` 控制是否覆盖同 id，覆盖内置题库时保留 `builtin` 标记
+- `preview`：拿一份 JSON 试算，**不校验必答**（用来验证计分规则写没写对）
+
+### 后台 · 统一词表
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/admin/keywords` | 六张词表（安全词 + 压力词）+ **疑似误报词**列表 |
+| `POST` | `/api/admin/keywords` | `action`: `save` / `toggle` / `reset` / `test` |
+
+- `save`：⚠️ **安全词表不允许被清空**（那等于这类风险不再识别），要临时关掉请用「停用」
+- `test`：拿一句话试，返回它会走哪条路（`urgent` / `safeMode` / `stress` / `none`）
+- 改完会调 `refreshLexicons()` 重新编译 —— 词表是**预编译在内存里**的，不在每条消息上读库
+
+### `assessments` 新增字段
+
+`POST /api/user/assessments` 的 `emotion` 类型新增 **`phq9SelfHarm`**（PHQ-9 第 9 题，0-3）：
+
+```json
+{ "type": "emotion", "data": { "phq9": 8, "gad7": 12, "phq9SelfHarm": 1 } }
+```
+
+⚠️ 这个字段**单独存**：PHQ-9 第 9 题（自伤念头）**有分就一票判"高"**，不看总分、不做加权 —— 见 `docs/PORTRAIT.md`。
+
+### 新增的数据库表
+
+| 表 | 说明 |
+|---|---|
+| `assessment_scales` | 题库（题目 / 计分规则 / 维度映射都存 JSON） |
+| `keyword_groups` | 统一词表六张（自伤倾向 / 伤人 / 违法 + 压力词轻中重三档） |
+| `suspected_words` | 疑似误报词（AI 判过的结论 + 累计次数，供运营决定要不要加进例外表） |
+
+---
+
+## 附：数据库表（13 张）
 
 | 表 | 说明 |
 |---|---|

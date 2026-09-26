@@ -208,6 +208,19 @@ export async function GET(request) {
     payload.warn = `${payload.warn} ${err?.code || err?.message || err}`.trim();
   }
 
+  // 列表范围：默认只看**内容审核**的；后台「日记」页会带 `?scope=diary` 拿日记那两类。
+  //
+  // ⚠️ 分开是有原因的：混在一起会诱使管理员对一条**日记打标**任务点「驳回」——
+  //    而打标根本没有"驳回"这个语义，那个误操作曾经把字符串 `reject`
+  //    写进了用户的日记标签里（用户卡片上就出现了一个「reject」）。
+  const scopeParam = String(new URL(request.url).searchParams.get("scope") || "review");
+  const scopeWhere =
+    scopeParam === "all"
+      ? ""
+      : scopeParam === "diary"
+        ? "WHERE COALESCE(t.task_kind, 'review') IN ('diary_mood','diary_generate')"
+        : "WHERE COALESCE(t.task_kind, 'review') = 'review'";
+
   try {
     // ⚠️ 列表里**不带 content**：图片是 base64，一次几十条会有好几 MB
     const tasks = await query(
@@ -216,6 +229,7 @@ export async function GET(request) {
               u.username, u.email
          FROM content_review_tasks t
          LEFT JOIN users u ON u.id = t.user_id
+        ${scopeWhere}
         ORDER BY t.id DESC
         LIMIT ${LIST_LIMIT}`
     );
@@ -304,6 +318,50 @@ export async function POST(request) {
       ip: clientIp(request),
     });
     return json(result);
+  }
+
+  /* ---- 重试失败的任务 ---- */
+  if (action === "retryFailed") {
+    // ⚠️ 把 failed 的任务打回 pending，并**把重试计数清零**。
+    //
+    //    平时失败任务是自动重试的（最多 2 次，见 `lib/content-review.js` 的 takePending）——
+    //    这个按钮的用途是"**换过提示词 / 换过模型之后，把之前失败的那批重新跑一遍**"。
+    //    计数清零是有意的：手动点一次 = 重新给满自动重试的机会。
+    const scope = String(body.scope || "review");
+    const scopeWhere =
+      scope === "diary"
+        ? "AND COALESCE(task_kind, 'review') IN ('diary_mood','diary_generate')"
+        : scope === "all"
+          ? ""
+          : "AND COALESCE(task_kind, 'review') = 'review'";
+
+    try {
+      const result = await query(
+        `UPDATE content_review_tasks
+            SET status = 'pending', retry_count = 0
+          WHERE status = 'failed' ${scopeWhere}`
+      );
+
+      const affected = Number(result?.affectedRows || 0);
+
+      await logAudit({
+        adminId: admin.adminId,
+        username: admin.username,
+        action: "review_retry_failed",
+        detail: `重试失败任务（范围 ${scope}）共 ${affected} 条`,
+        ip: clientIp(request),
+      });
+
+      return json({
+        ok: true,
+        affected,
+        message: affected
+          ? `已把 ${affected} 条失败任务放回待处理队列 —— 点「立即提交」就会重跑`
+          : "没有失败的任务",
+      });
+    } catch (err) {
+      return jsonError(`重试失败：${err?.message || err}`, 500);
+    }
   }
 
   /* ---- 手动触发：为昨天排「生成日记」任务 ---- */

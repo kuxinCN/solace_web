@@ -33,11 +33,33 @@ function parseId(value) {
 async function loadUser(userId) {
   const rows = await query(
     `SELECT id, email, account, username, gender, birthday, phone, remark,
-            status, source, created_at, last_login_at
+            status, source, created_at, last_login_at,
+            portrait, portrait_version, portrait_updated_at
        FROM users WHERE id = ? LIMIT 1`,
     [userId]
   );
-  return rows[0] || null;
+
+  const row = rows[0];
+  if (!row) return null;
+
+  // ⚠️ MySQL 的 JSON 列出来是**字符串**，先转好再给前端 ——
+  //    不然后台还要自己 JSON.parse 一次，容易漏。
+  let portrait = null;
+  if (row.portrait) {
+    try {
+      portrait = typeof row.portrait === "object" ? row.portrait : JSON.parse(row.portrait);
+    } catch {
+      portrait = null;
+    }
+  }
+
+  return {
+    ...row,
+    // 心理画像（含标签 / 判定依据 / 原始分数）——**用户端不可见**，只在这个后台接口里给
+    portrait,
+    portraitVersion: row.portrait_version || "",
+    portraitUpdatedAt: row.portrait_updated_at || null,
+  };
 }
 
 async function loadStats(userId) {

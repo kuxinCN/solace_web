@@ -3,6 +3,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import ContentReviewPanel from "@/components/ContentReviewPanel";
 import DiaryTaskPanel from "@/components/DiaryTaskPanel";
+import FloatingAlert from "@/components/FloatingAlert";
+import KeywordManager from "@/components/KeywordManager";
+import PortraitPanel from "@/components/PortraitPanel";
+import ScaleManagerPanel from "@/components/ScaleManagerPanel";
+import StressDiagnosePanel from "@/components/StressDiagnosePanel";
 
 /* ------------------------------------------------------------------ 样式 */
 
@@ -138,27 +143,17 @@ const FIELDS = {
       type: "boolean",
       hint: "关闭后所有内容都会原样发给 AI（不建议关闭）",
     },
-    {
-      key: "extraSelfHarm",
-      label: "自伤倾向 · 自定义词",
-      type: "textarea",
-      rows: 5,
-      hint: "一行一个词，命中后返回温和承接 + 心理援助热线。以 # 开头的行当注释忽略。内置规则始终生效，这里只做补充。",
-    },
-    {
-      key: "extraViolence",
-      label: "伤害他人 · 自定义词",
-      type: "textarea",
-      rows: 4,
-      hint: "一行一个词。内置规则始终生效，这里只做补充。",
-    },
-    {
-      key: "extraIllegal",
-      label: "违法行为 · 自定义词",
-      type: "textarea",
-      rows: 4,
-      hint: "一行一个词。内置规则始终生效，这里只做补充。",
-    },
+    /* ⚠️ 这里原本有三个「自定义追加词」文本框
+       （extraSelfHarm / extraViolence / extraIllegal）——
+       统一词表上线后**已撤掉**：同一个东西在两个地方编辑，
+       改完一处还得记得改另一处，迟早会漏。
+
+       现在词表的唯一编辑入口是下面的「统一词表」区（`components/KeywordManager.jsx`），
+       那三个字段还保留着「启用内容安全过滤」开关，因为它是整层的总闸。
+
+       ⚠️ 库里那三个字段的值**没有被删** —— 启动时会自动并进词表
+       （见 `lib/lexicon-store.js` 的 `migrateLegacyExtraWords`），
+       所以以前填过的词不会静默失效。 */
 
     /* ---------------- 压力评估 ---------------- */
 
@@ -443,6 +438,12 @@ const FIELDS = {
     { key: "maxItemsPerBatch", label: "每次最多提交条数（1-100）", type: "number" },
     { key: "timeoutSeconds", label: "逐条模式超时（秒）", type: "number" },
     {
+      key: "reviewMaxTokens",
+      label: "单条输出上限（token）",
+      type: "number",
+      hint: "默认 200。审核只需要回一个极短的 JSON，200 足够；给多了纯属浪费。（生成日记那种长输出的额度在「日记」页调）",
+    },
+    {
       key: "keepDays",
       label: "审核记录保留天数",
       type: "number",
@@ -528,13 +529,37 @@ const FIELDS = {
       key: "maxMessages",
       label: "最多取多少条聊天消息",
       type: "number",
-      hint: "默认 120 条，取最近的那些",
+      hint: "默认 60 条，取最近的那些。⚠️ 取太多会占掉输出的 token 额度",
     },
     {
       key: "maxChars",
       label: "聊天记录最长多少字",
       type: "number",
-      hint: "默认 6000 字，超出会从**末尾**截（保留最近的，那儿的情绪最完整）",
+      hint: "默认 2500 字，超出会从**末尾**截（保留最近的，那儿的情绪最完整）。⚠️ **这个值直接决定 AI 还剩多少余地写日记** —— 出过的事：输入 4000+ 字把输出预算挤没了，日记写到一半就断",
+    },
+    {
+      key: "diaryMinWords",
+      label: "日记最少多少字",
+      type: "number",
+      hint: "默认 150。会替换提示词里的 `{minWords}` 占位符（不用去改提示词正文）",
+    },
+    {
+      key: "diaryMaxWords",
+      label: "日记最多多少字",
+      type: "number",
+      hint: "默认 250。会替换提示词里的 `{maxWords}` 占位符。⚠️ 别设太长：输出越长越容易被额度掐断，而且用户读日记不是读作文",
+    },
+    {
+      key: "generateMaxTokens",
+      label: "生成长度上限（token）",
+      type: "number",
+      hint: "默认 3000。⚠️ **日记被截断时第一个要调的就是这个** —— 一篇 250 字的日记约 400-600 token，输入越长越要留足。**保存即生效，不用重新部署**。被截断的结果不会保存（会标 failed 等重试），任务原因里会写清输入/输出各多少字",
+    },
+    {
+      key: "moodMaxTokens",
+      label: "打标输出上限（token）",
+      type: "number",
+      hint: "默认 30。打标只要输出一个情绪词，给多了纯属浪费",
     },
     {
       key: "generatePrompt",
@@ -560,6 +585,7 @@ const TABS = [
   { id: "mail", label: "邮箱 / 验证码" },
   { id: "users", label: "用户管理" },
   { id: "userdata", label: "用户数据" },
+  { id: "scales", label: "量表题库" },
   { id: "site", label: "站点信息" },
   { id: "logs", label: "操作日志" },
 ];
@@ -2832,6 +2858,17 @@ function UserDataPanel({ initialUserId, setError, setNotice }) {
               </button>
             </div>
 
+            {/* ---- 心理画像（**用户端不可见**，只在这个后台页面展示）----
+                ⚠️ 放在基本信息下面、详细字段上面 —— 它的优先级比"性别/生日"这类字段高：
+                    它会影响这个用户每一次和 AI 聊天的语气，运营应该一眼看到。 */}
+            <div className="mb-4">
+              <PortraitPanel
+                portrait={profile.user.portrait}
+                version={profile.user.portraitVersion}
+                updatedAt={profile.user.portraitUpdatedAt}
+              />
+            </div>
+
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-slate-600">
               <div>
                 <span className="text-slate-400 block">邮箱</span>
@@ -3454,8 +3491,8 @@ export default function AdminPage() {
             后台的所有配置都存在 MySQL 里，所以先把数据库连上。数据库还没建的话，
             请先在宝塔面板创建数据库并导入 <code>db/schema.sql</code>。
           </p>
-          {error ? <Alert kind="error">{error}</Alert> : null}
-          {notice ? <Alert kind="success">{notice}</Alert> : null}
+          <FloatingAlert error={error} notice={notice} setError={setError} setNotice={setNotice} />
+          
           <DatabasePanel
             bootstrap
             setError={setError}
@@ -3488,7 +3525,7 @@ export default function AdminPage() {
       <div className="min-h-screen px-4 py-6">
         {error ? (
           <div className="max-w-sm mx-auto">
-            <Alert kind="error">{error}</Alert>
+            <FloatingAlert error={error} notice={notice} setError={setError} setNotice={setNotice} />
           </div>
         ) : null}
         <LoginView
@@ -3538,8 +3575,8 @@ export default function AdminPage() {
           ))}
         </div>
 
-        {error ? <Alert kind="error">{error}</Alert> : null}
-        {notice ? <Alert kind="success">{notice}</Alert> : null}
+        <FloatingAlert error={error} notice={notice} setError={setError} setNotice={setNotice} />
+        
 
         {tab === "overview" ? (
           <OverviewPanel overview={overview} onReload={() => loadAll().catch((err) => setError(err.message))} />
@@ -3629,15 +3666,37 @@ export default function AdminPage() {
         ) : null}
 
         {tab === "safety" ? (
-          <SettingsGroup
-            group="safety"
-            title="内容安全"
-            description="在把用户消息发给 AI 之前先过一遍规则。只拦「自伤倾向 / 伤害他人 / 明显违法」三类；命中后不调用 AI，而是返回一句温和的承接话术 + 心理援助热线。词表改完保存立即生效，不用重启。"
-            settings={settings}
-            setError={setError}
-            setNotice={setNotice}
-            onSaved={loadAll}
-          />
+          <>
+            <SettingsGroup
+              group="safety"
+              title="内容安全与压力"
+              description="① 内容安全：用户消息发给 AI 之前先过一遍规则，只拦「自伤倾向 / 伤害他人 / 明显违法」三类。命中后分两种走法 —— 带明确计划或时间表达的（紧迫）**直接截断**，返回干预话术 + 400-161-9995；其余走**安全模式**（正常调 AI，附加安全指令要求先共情再引导，回复里没提到热线会自动补一句）。② 压力评估：读「聊天 + 日记」两条通道，压力连续偏高时在右上角温和地问一句要不要放松。③ 词表：安全词和压力词都在下面统一管理，改完保存立即生效，不用重启。"
+              settings={settings}
+              setError={setError}
+              setNotice={setNotice}
+              onSaved={loadAll}
+            >
+              <div className="border-t border-[#eceeec] pt-3 mt-1">
+                {/* ⚠️ 诊断面板放在这里：改完配置能**立刻看到效果好不好** ——
+                    它会把"最近 24 小时有没有记录、超阈值几次、实际提醒几次、
+                    有没有卡住的会话"全摆出来，并用人话说明为什么不弹。 */}
+                <StressDiagnosePanel api={api} setError={setError} setNotice={setNotice} />
+              </div>
+
+              <div className="border-t border-[#eceeec] pt-3 mt-1">
+                {/* ⚠️ **统一词表就放在这一页**（和上面的安全配置同一处）——
+                    管理员要回答的问题只有一个：「什么话会被拦、什么话会算成压力」。
+                    拆成两个页面，改完一边还得去另一边确认，反而容易漏。
+
+                    ⚠️ 这里也是词表的**唯一**编辑入口 —— 早期那三个「自定义追加词」
+                    文本框已经撤掉了，以前填过的词会在启动时自动并进下面的表里。 */}
+                <p className="mb-2 text-xs font-semibold text-slate-600">
+                  统一词表（安全词 + 压力词）
+                </p>
+                <KeywordManager api={api} setError={setError} setNotice={setNotice} />
+              </div>
+            </SettingsGroup>
+          </>
         ) : null}
 
         {tab === "review" ? (
@@ -3866,6 +3925,10 @@ export default function AdminPage() {
             setError={setError}
             setNotice={setNotice}
           />
+        ) : null}
+
+        {tab === "scales" ? (
+          <ScaleManagerPanel api={api} setError={setError} setNotice={setNotice} />
         ) : null}
 
         {tab === "logs" ? <LogsPanel /> : null}

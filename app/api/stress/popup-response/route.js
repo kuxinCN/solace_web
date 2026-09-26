@@ -16,7 +16,8 @@
  *    （危机弹窗走的是另一条路，不受阈值影响）。
  */
 import { execute } from "@/lib/db";
-import { clampScore, getStressState, updateStressState } from "@/lib/stress-state";
+import { getGroup } from "@/lib/settings";
+import { clampScore, getStressState, resolveThreshold, updateStressState } from "@/lib/stress-state";
 import { getCurrentUser } from "@/lib/user-auth";
 import { json, jsonError, readJsonBody } from "@/lib/util";
 
@@ -38,8 +39,13 @@ export async function POST(request) {
   const method = String(body.method || "").slice(0, 24);
   const scoreBefore = clampScore(body.score);
 
+  const config = await getGroup("safety").catch(() => ({}));
   const state = await getStressState(user.id);
-  const threshold = Number(state.threshold) || 70;
+
+  // ⚠️ 基准必须是**当前真正生效的阈值**。
+  //    直接读 `state.threshold` 的话，它是 0（表示"跟随后台配置"）时，
+  //    "+5" 会算出 5 —— 阈值一下子掉到最低，之后每条消息都会弹。
+  const threshold = resolveThreshold(state.threshold, config?.stressThreshold);
 
   try {
     /* ---- 接受：开一次放松会话 ---- */

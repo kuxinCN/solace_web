@@ -176,7 +176,10 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
     async (silent) => {
       if (!silent) setLoading(true);
       try {
-        const result = await api("/api/admin/review");
+        // ⚠️ 带上 scope=diary：这个面板只管日记那两类任务（打标 / 生成）。
+        //    不带的默认只返回内容审核任务 —— 免得在这里看到审核记录，
+        //    也免得在「数据审核」页看到日记任务（在那儿点「驳回」是错的语义）。
+        const result = await api("/api/admin/review?scope=diary");
         setData(result);
         if (result?.warn) setError(String(result.warn));
       } catch (err) {
@@ -210,7 +213,12 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
       setError("");
       setNotice("");
       try {
-        const result = await api("/api/admin/review", { method: "POST", body: { action } });
+        // ⚠️ 带上 scope=diary —— 这里的动作只该作用在**日记那两类任务**上。
+        //    尤其「重试失败任务」：不带 scope 会把内容审核的失败任务也一起放回队列。
+        const result = await api("/api/admin/review", {
+          method: "POST",
+          body: { action, scope: "diary" },
+        });
 
         if (action === "submit") {
           setNotice(
@@ -220,7 +228,45 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
           );
         } else if (action === "poll") {
           if (Array.isArray(result?.detail) && result.detail.length) {
-            setNotice(result.detail.join(" ｜ "));
+            // ⚠️ **批次状态要写成人话** —— `{batchId, status}` 直接 JSON 出来，
+            //    用户看到的是一串花括号，完全不知道在说什么（实际发生过）。
+            //    ⚠️ 下面刻意用字符串拼接而不是模板字符串：这个文件被 shell 改过，
+            //       反引号曾被 PowerShell 吃掉过一次，能避开就避开。
+            const STATUS_TEXT = {
+              validating: "排队中（上游还在校验）",
+              in_progress: "正在跑",
+              running: "正在跑",
+              completed: "已完成",
+              succeeded: "已完成",
+              failed: "失败了",
+              cancelled: "已取消",
+              expired: "已超时",
+            };
+
+            const humanize = (item) => {
+              if (typeof item === "string") return item;
+              if (!item || typeof item !== "object") return String(item ?? "");
+
+              const id = item.batchId || item.batch_id;
+              if (!id) {
+                return item.message || item.reason || item.text || item.name || "（无法识别的结果）";
+              }
+
+              // ⚠️ 只留后 8 位 —— 完整 batchId 有 30 多个字符，提示条里放不下，
+              //    而后 8 位足够区分（也够拿去小米控制台搜）。
+              const short = String(id).slice(-8);
+              if (item.error) return "批次 …" + short + "：❌ " + item.error;
+
+              const label = STATUS_TEXT[item.status] || item.status || "状态未知";
+              const counts =
+                item.passCount != null
+                  ? "（通过 " + item.passCount + " / 违规 " + (item.rejectCount || 0) + "）"
+                  : "";
+
+              return "批次 …" + short + "：" + label + counts;
+            };
+
+            setNotice(result.detail.map(humanize).join(" ｜ "));
           } else {
             setNotice(result?.message || "暂无已完成的结果");
           }
@@ -288,6 +334,27 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
         </button>
         <button type="button" className={BTN} disabled={loading} onClick={() => list()}>
           {loading ? "刷新中…" : "刷新"}
+        </button>
+        {/* ⚠️ 「重试失败任务」：把 failed 打回 pending 并**清零重试计数**。
+                 适合"换过提示词 / 换过模型之后把之前失败的那批重跑一轮"。
+                 平时失败任务是自动重试的（最多 2 次），所以不点它也不会一直卡着。 */}
+        <button
+          type="button"
+          className={BTN}
+          disabled={busy === "retryFailed"}
+          onClick={() => {
+            if (
+              !window.confirm(
+                "把所有「失败」的任务放回待处理队列？\n\n适合换过提示词或模型之后重跑一轮。放回后点「立即提交」就会重跑。"
+              )
+            ) {
+              return;
+            }
+            runAction("retryFailed", "重试失败任务");
+          }}
+          title="把失败的任务打回队列并清零重试计数，之后点「立即提交」就会重跑"
+        >
+          {busy === "retryFailed" ? "重试中…" : "重试失败任务"}
         </button>
         <span className="text-[11px] text-slate-400">
           和「数据审核」共用同一个批量队列 —— 在那边点提交也一样

@@ -1524,7 +1524,7 @@ export default function Chat() {
         body: JSON.stringify(payload),
       });
       if (!res.ok || !res.body) {
-        return fullReply || "我暂时无法回应，请稍后再试。";
+        return String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd() || "我暂时无法回应，请稍后再试。";
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -1546,7 +1546,7 @@ export default function Chat() {
             const delta = parsed?.delta;
             if (delta) {
               fullReply += delta;
-              onDelta?.(fullReply);
+              onDelta?.(String(fullReply).replace(/\[RISK[^\]]*\]/gi, ""));
             }
           } catch (e) {
             // 忽略单行解析错误
@@ -1556,7 +1556,7 @@ export default function Chat() {
     } catch (err) {
       // 流中断：保留已收到的部分，不清空
     }
-    return fullReply || "我暂时无法回应，请稍后再试。";
+    return String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd() || "我暂时无法回应，请稍后再试。";
   }
 
   // 长期记忆异步提炼：流式回复结束后 fire-and-forget 调用。
@@ -2356,7 +2356,7 @@ export default function Chat() {
               const delta = parsed?.delta;
               if (delta) {
                 fullReply += delta;
-                updateAiStream(aiCk, fullReply);
+                updateAiStream(aiCk, String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd());
               }
             } catch (e) {
               // 忽略单行解析错误
@@ -2369,11 +2369,12 @@ export default function Chat() {
       if (fullReply) interrupted = true;
     }
     // 流结束：剩余分段全部发出
-    finishReveal(aiCk, fullReply);
+    finishReveal(aiCk, String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd());
     if (!fullReply) fullReply = "我在。";
 
     // 4) AI 回复落库（中断时标注），成功后气泡就地转正
-    const replyToSave = interrupted ? `${fullReply}（回复中断）` : fullReply;
+    const safeReply = String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd();
+    const replyToSave = interrupted ? `${safeReply}（回复中断）` : safeReply;
     let savedAiMsg = null;
     if (convId) {
       try {
@@ -4087,25 +4088,26 @@ export default function Chat() {
                               {d.title}
                             </p>
                           </div>
+                          {/* 第二行：**标签在左、正文预览在中、日期在右**。
+                              ⚠️ 两个标签都要显示、而且要分清来源：
+                                 「用户 · 疲惫」是写日记时自己选的，
+                                 「AI · 疲惫」是 AI 读出来的 —— 不区分会显得自相矛盾。
+                              ⚠️ 两个都走 MoodBadge（它内部是白名单，认不出的值直接不渲染）。
+                                 以前这里是把 d.mood 原样打出来，于是后台一次误操作
+                                 留下的「reject」被当成情绪标签显示在了卡片上。 */}
                           <div className="flex items-center gap-2 mt-1">
-                            <span className="text-xs text-slate-300">
-                              {formatDateCN(d.created_at)}
+                            <span className="flex shrink-0 items-center gap-1">
+                              <MoodBadge mood={d.user_mood} source="user" />
+                              <MoodBadge mood={d.mood} source="ai" />
                             </span>
-                            {/* 情绪标签：暖色系色块，按情绪微调色相（温和描述，不做红黄绿分级） */}
-                            {d.mood ? (
-                              <span
-                                className={`text-[11px] leading-none rounded-full px-2 py-0.5 border ${
-                                  MOOD_COLORS[d.mood] || MOOD_COLOR_DEFAULT
-                                }`}
-                              >
-                                {d.mood}
-                              </span>
-                            ) : null}
+                            <p className="flex-1 min-w-0 truncate text-xs text-slate-400">
+                              {(d.content || "").slice(0, 30) || "（空）"}
+                              {(d.content || "").length > 30 ? "…" : ""}
+                            </p>
+                            <span className="shrink-0 text-xs text-slate-300">
+                              {formatDateCN(d.diary_date || d.created_at)}
+                            </span>
                           </div>
-                          <p className="text-xs text-slate-400 truncate mt-0.5">
-                            {(d.content || "").slice(0, 30) || "（空）"}
-                            {(d.content || "").length > 30 ? "…" : ""}
-                          </p>
                           {/* 右上角操作：图钉（置顶）/ 星星（收藏）/ 删除。
                               多选模式下隐藏；未激活的悬停卡片才出现，已激活的常显高亮 */}
                           {!diaryMultiMode && (

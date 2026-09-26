@@ -51,7 +51,7 @@ export async function POST(request) {
     }
   } else {
     // emotion: phq9 / gad7 两个分数，0-27 整数
-    const { phq9, gad7 } = data;
+    const { phq9, gad7, phq9SelfHarm } = data;
     data = {};
     for (const [k, v] of [["phq9", phq9], ["gad7", gad7]]) {
       const n = Number(v);
@@ -60,6 +60,14 @@ export async function POST(request) {
       }
       data[k] = Math.round(n);
     }
+
+    // ⚠️ PHQ-9 第 9 题（自伤念头）**单独存一份**。
+    //    心理画像里它是"一票判高风险"的依据（见 lib/portrait.js）——
+    //    被总分平均掉是不行的。前端不传也没关系，那就当没有这个信息。
+    const selfHarm = Number(phq9SelfHarm);
+    if (Number.isFinite(selfHarm) && selfHarm >= 0 && selfHarm <= 3) {
+      data.phq9SelfHarm = Math.round(selfHarm);
+    }
   }
 
   try {
@@ -67,6 +75,17 @@ export async function POST(request) {
       "INSERT INTO assessment_results (user_id, type, data) VALUES (?, ?, ?)",
       [user.id, type, JSON.stringify(data)]
     );
+
+    // ⚠️ 做完测评就重算一次画像（**纯本地规则引擎，不调用任何 AI**）。
+    //    不 await 它的结果做判断：画像算不出来**不该影响"测评已保存"**这件事。
+    //    用动态 import，避免这个接口的依赖链被拖长。
+    try {
+      const { refreshPortrait } = await import("@/lib/portrait-store");
+      await refreshPortrait(user.id, { force: true });
+    } catch {
+      /* 画像失败静默 —— 下次做测评或压力值变化时还会再试 */
+    }
+
     return json({ ok: true, id: result.insertId });
   } catch (err) {
     return jsonError(describeDbError(err), 500);

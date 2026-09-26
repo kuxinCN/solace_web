@@ -33,10 +33,27 @@ const MIN_PASSWORD_LENGTH = 6;
 const MAX_PASSWORD_LENGTH = 64;
 
 const SELECT_FIELDS =
-  "id, email, account, username, avatar_url, gender, birthday, phone, remark, status, source, created_at, last_login_at, password_enc";
+  "id, email, account, username, avatar_url, gender, birthday, phone, remark, status, source, created_at, last_login_at, password_enc, portrait, portrait_version, portrait_updated_at";
+
+/** MySQL 的 JSON 列出来是字符串，转一下；转不动就返回 null（不抛错） */
+function parsePortrait(value) {
+  if (value == null) return null;
+  if (typeof value === "object") return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return null;
+  }
+}
 
 function shapeUser(row, revealPassword) {
-  const { password_enc: passwordEnc, ...rest } = row;
+  const {
+    password_enc: passwordEnc,
+    portrait,
+    portrait_version: portraitVersion,
+    portrait_updated_at: portraitUpdatedAt,
+    ...rest
+  } = row;
   const hasPassword = Boolean(passwordEnc);
   const plain = revealPassword && hasPassword ? decryptText(passwordEnc) : "";
 
@@ -47,6 +64,13 @@ function shapeUser(row, revealPassword) {
     // 只有 revealPassword=1 时才带明文；解不出来（密钥变过）时 passwordReadable 为 false
     password: plain,
     passwordReadable: hasPassword ? plain !== "" : true,
+
+    // ---- 心理画像（**用户端不可见**，只在后台展示）----
+    // ⚠️ 连着 basis（判定依据）和 sourceScores（原始分数）一起给 ——
+    //    只给标签的话，运营只能猜"压力水平=高"是凭什么得来的。
+    portrait: parsePortrait(portrait),
+    portraitVersion: portraitVersion || "",
+    portraitUpdatedAt: portraitUpdatedAt || null,
   };
 }
 

@@ -18,6 +18,7 @@
  *     不是监控面板。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useDraggable } from "@/lib/use-draggable";
 
 /** 档位配色（按 max 分界，从低到高） */
 const TONE_BY_LEVEL = [
@@ -130,29 +131,56 @@ export default function StressMeter({ api, onPendingPopup }) {
     }
   }, [api, onPendingPopup]);
 
+  // ⚠️ 轮询**和"显不显示"无关**。
+  //
+  //    原来这里是 `if (hidden) return;` —— 于是用户点一下那个 × 收起仪表盘之后
+  //    就不再有轮询，而**聊天场景的弹窗完全依赖这个轮询** …
+  //    结果就是：收起一次，提醒功能就再也不工作了。
+  //    收起只是不显示，该拉的状态还是要拉。
   useEffect(() => {
-    if (hidden) return;
-
     load();
 
-    // ⚠️ 每 45 秒复查一次。
-    //    聊天接口里的压力分析是 fire-and-forget（不能拖慢用户等回复），
-    //    所以"算完了、该弹窗了"这个结论**得靠这里拉回来** ——
-    //    这是聊天场景弹窗能出现的关键一环（日记场景则是随保存响应直接给）。
+    // 每 45 秒复查一次：聊天接口里的压力分析是 fire-and-forget（不能拖慢用户等回复），
+    // 所以"算完了、该弹窗了"这个结论**得靠这里拉回来** ——
+    // 这是聊天场景弹窗能出现的唯一一环（日记场景则是随保存响应直接给）。
     const timer = window.setInterval(load, 45000);
     return () => window.clearInterval(timer);
-  }, [hidden, load]);
+  }, [load]);
 
   const tone = useMemo(() => toneOf(data?.score), [data?.score]);
 
-  // 用户收起时：只留一个小圆点，点一下还能展开
+  // ⚠️ 收起后的小球**可以拖动**（位置记在 localStorage，刷新还在原地）。
+  //    拖动能力用的是 lib/use-draggable.js —— 音乐播放器那边是同一套。
+  const ball = useDraggable({
+    storageKey: "solace_stress_ball",
+    defaultRight: 16,
+    defaultTop: 16,
+  });
+
+  // ⚠️ 展开 / 收起时容器尺寸会变（小圆点 ↔ 212px 的面板），位置要**重新夹一次边界** ——
+  //    和音乐浮窗是同一套处理。不做的话：把小球拖到屏幕右边再展开，
+  //    面板会有一部分跑到屏幕外，而那时小球已经变成面板了，**用户没东西可拖**。
+  useEffect(() => {
+    ball.reclamp();
+  }, [hidden]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 用户收起时：只留一个小圆点，点一下还能展开（也可以拖着换个地方放）
   if (hidden) {
     return (
       <button
+        ref={ball.ref}
+        style={ball.style}
+        {...ball.handlers}
         type="button"
-        onClick={() => setHiddenPersist(false)}
-        title="显示压力读数"
-        className="fixed right-4 top-4 z-30 h-8 w-8 rounded-full border border-[#e2e5e2] bg-white/80 text-[11px] text-slate-400 shadow-sm backdrop-blur transition hover:text-slate-600"
+        onClick={() => {
+          // ⚠️ 刚才是"拖"就不算"点" —— 否则每次拖完都会顺手把面板展开
+          if (ball.shouldIgnoreClick()) return;
+          setHiddenPersist(false);
+        }}
+        title="显示压力读数（可以拖动）"
+        className={`fixed z-30 h-8 w-8 cursor-grab rounded-full border border-[#e2e5e2] bg-white/80 text-[11px] text-slate-400 shadow-sm backdrop-blur transition-colors hover:text-slate-600 ${
+          ball.dragging ? "cursor-grabbing" : ""
+        }`}
       >
         ·
       </button>
@@ -160,7 +188,11 @@ export default function StressMeter({ api, onPendingPopup }) {
   }
 
   return (
-    <div className="fixed right-4 top-4 z-30 w-[212px]">
+    // ⚠️ 展开的面板**也要挂 ref / style** ——
+    //    ① 它才会出现在**小球当前的位置**（而不是硬编码的右上角）；
+    //    ② `useDraggable` 内部要靠 `ref` 量尺寸，不挂的话它只能拿到兜底的 44×44，
+    //       上面那个 `reclamp()` 就会按错误尺寸夹边界。
+    <div ref={ball.ref} style={ball.style} className="fixed z-30 w-[212px]">
       <div className="rounded-2xl border border-[#e8eae7] bg-white/90 p-3 shadow-sm backdrop-blur">
         <div className="flex items-center gap-3">
           <div className="relative">

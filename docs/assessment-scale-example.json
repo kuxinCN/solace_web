@@ -1,0 +1,120 @@
+{
+
+&#x20; "\_comment": "本题库 JSON 为格式示例，用于说明字段结构。实际题库请按此格式填写完整题目。",
+
+
+
+&#x20; "id": "example-scale",
+
+&#x20; "name": "示例量表名称",
+
+&#x20; "description": "量表简介，用于后台展示",
+
+&#x20; "version": "1.0",
+
+&#x20; "enabled": true,
+
+
+
+&#x20; "questions": \[
+
+&#x20;   {
+
+&#x20;     "\_comment": "单题结构示例",
+
+&#x20;     "id": 1,
+
+&#x20;     "text": "题目文本",
+
+&#x20;     "options": \[
+
+&#x20;       { "value": 0, "label": "选项一" },
+
+&#x20;       { "value": 1, "label": "选项二" },
+
+&#x20;       { "value": 2, "label": "选项三" },
+
+&#x20;       { "value": 3, "label": "选项四" }
+
+&#x20;     ],
+
+&#x20;     "reverse": false,
+
+&#x20;     "dimension": "所属维度名称"
+
+&#x20;   },
+
+&#x20;   {
+
+&#x20;     "\_comment": "反向计分题示例：reverse=true 时，计分时用 (maxValue - value)",
+
+&#x20;     "id": 2,
+
+&#x20;     "text": "反向计分题目文本",
+
+&#x20;     "options": \[
+
+&#x20;       { "value": 0, "label": "选项一" },
+
+&#x20;       { "value": 1, "label": "选项二" },
+
+&#x20;       { "value": 2, "label": "选项三" },
+
+&#x20;       { "value": 3, "label": "选项四" }
+
+&#x20;     ],
+
+&#x20;     "reverse": true,
+
+&#x20;     "dimension": "所属维度名称"
+
+&#x20;   }
+
+&#x20; ],
+
+
+
+&#x20; "scoring": {
+
+&#x20;   "\_comment": "计分规则示例",
+
+&#x20;   "type": "sum",
+
+&#x20;   "maxScore": 40,
+
+&#x20;   "reverseRule": "maxValue - value",
+
+&#x20;   "thresholds": \[
+
+&#x20;     { "min": 0, "max": 13, "level": "低" },
+
+&#x20;     { "min": 14, "max": 19, "level": "中" },
+
+&#x20;     { "min": 20, "max": 40, "level": "高" }
+
+&#x20;   ]
+
+&#x20; },
+
+
+
+&#x20; "dimensions": \["维度一", "维度二"],
+
+
+
+&#x20; "meta": {
+
+&#x20;   "\_comment": "可选字段，用于后台管理和版本追溯",
+
+&#x20;   "author": "作者/来源",
+
+&#x20;   "createdAt": "2026-09-24",
+
+&#x20;   "updatedAt": "2026-09-24",
+
+&#x20;   "tags": \["压力", "自评"]
+
+&#x20; }
+
+}
+

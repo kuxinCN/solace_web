@@ -11,9 +11,12 @@
  *   * 配置（接口地址 / Key / 模型）从后台数据库读，数据库没配好时回退 .env.local
  */
 import { requestChat, chatCompletionsUrl, prewarmConnections } from "@/lib/ai";
-import { checkUserContent } from "@/lib/content-guard";
+import { SAFE_MODE_INSTRUCTION, checkUserContent, ensureHotline } from "@/lib/content-guard";
+import { SUSPECT_INSTRUCTION, recordSuspected, takeRiskTag } from "@/lib/suspected-store";
 import { execute, query } from "@/lib/db";
 import { withTiming } from "@/lib/perf";
+import { buildStyleBlock } from "@/lib/portrait";
+import { getPortrait } from "@/lib/portrait-store";
 import { recordAiUsage } from "@/lib/usage";
 import { rateLimit } from "@/lib/rate-limit";
 import { getGroup } from "@/lib/settings";
@@ -207,6 +210,22 @@ async function handleChat(request) {
     systemBlock.push(...frontEndSystem);
   }
 
+  // ---- 心理画像 → 聊天风格指令 ----
+  //
+  // ⚠️ **纯本地字符串映射，不调用任何 AI**（规则见 lib/portrait.js）。
+  // ⚠️ 位置：**人格提示词之后、长期记忆之前** ——
+  //    它是"针对这个用户的微调"，不替换全局人设；
+  //    而长期记忆和日记正文要更贴近用户消息（见上面的顺序说明）。
+  // ⚠️ 取不到画像（新用户没做任何测评）时**一条都不加**，不报错、不降级：
+  //    行为和加这个功能之前完全一样。
+  try {
+    const stored = await getPortrait(user.id);
+    const styleBlock = buildStyleBlock(stored?.portrait);
+    if (styleBlock) systemBlock.push({ role: "system", content: styleBlock });
+  } catch (err) {
+    console.warn("[portrait] 读画像失败，本次只用全局人格提示词：", err?.message || err);
+  }
+
   // 长期记忆：放在人格提示词之后（最多 20 条 / 总长 800 字以内），为空则不插入
   const memoryMessage = buildMemoryMessage(await withMemoryTimeout(memoriesPromise));
   if (memoryMessage) systemBlock.push(memoryMessage);
@@ -221,17 +240,19 @@ async function handleChat(request) {
     systemBlock.push({ role: "system", content });
   }
 
-  const messages = [...systemBlock, ...dialogue];
-
   if (dialogue.length === 0) {
     return Response.json({ reply: FALLBACK_REPLY, error: "没有可发送的内容" });
   }
 
-  // 内容安全：只拦真正危险的类别（自伤 / 伤害他人 / 违法）。
-  // 命中后不调用 AI，直接给一句温和的承接话术 + 求助信息；
-  // ⚠️ 只记录类别，不把用户原话写进数据库或日志。
+  // ---- 内容安全：三层判定（危机 → 安全词 → 压力词），见 lib/content-guard.js ----
+  //
+  // ⚠️ **这一段必须在 `const messages = [...]` 之前做完** ——
+  //    "安全模式"要往 systemBlock 里追加指令，而 messages 一旦拼好就加不进去了。
+  // ⚠️ 命中只记录"类别 + 规则名"，**不把用户原话写进数据库或日志**。
   const lastUserMessage = [...dialogue].reverse().find((item) => item.role === "user");
   const safety = await checkUserContent(lastUserMessage?.content || "");
+
+  /* ---- ① 紧迫危机：截断，不给 AI 自由发挥的余地 ---- */
   if (safety.blocked) {
     try {
       await execute(
@@ -265,6 +286,61 @@ async function handleChat(request) {
       },
     });
   }
+
+  /* ---- ② 安全模式：**不截断**，正常调 AI + 附加安全指令 ---- */
+  //
+  // ⚠️ 这是本次改造的重点。命中自伤/伤人/违法的表达时，
+  //    与其甩一句固定话术（那是"关门"），不如**让 AI 接着聊**（这是"扶着"）——
+  //    固定话术会让正在倾诉的人立刻感到被推开，而那段话恰恰是他最需要被接住的时候。
+  // ⚠️ 只有**紧迫危机**（有计划、有时间、已经做准备）才截断 —— 见上面那一段。
+  /* ---- ② 安全模式：**不截断**，正常调 AI + 附加安全指令 ---- */
+  //
+  // ⚠️ 这是本次改造的重点。命中自伤/伤人/违法的表达时，
+  //    与其甩一句固定话术（那是"关门"），不如**让 AI 接着聊**（这是"扶着"）——
+  //    固定话术会让正在倾诉的人立刻感到被推开，而那段话恰恰是他最需要被接住的时候。
+  // ⚠️ 只有**紧迫危机**（有计划、有时间、已经做准备）才截断 —— 见上面那一段。
+  const safeMode = Boolean(safety.safeMode);
+  // ⚠️ **疑似命中**（"前缀+后缀"组合出来的，比如"想"+"死"）——
+  //    只有这种才给 AI 判语义的机会；`high`（完整短语命中，如"遗书"）不给。
+  const isSuspect = safeMode && safety.confidence === "suspect";
+
+  if (safeMode) {
+    // ⚠️ **一定要打这条日志**：出问题时（"为什么没有热线？"）第一步就是看这里 ——
+    //    有这条 = 检测层认出来了，问题在输出侧；没这条 = 检测层根本没命中。
+    //    不记原文，只记类别。
+    console.log(
+      `[chat] 安全模式：命中「${safety.name}」${isSuspect ? `（疑似「${safety.matched}」，交给 AI 判）` : ""}，已附加安全指令（user=${user.id}）`
+    );
+
+    // ⚠️ **不 await** —— 这条 INSERT 就在响应链路上，而安全模式下每次聊天都要走一遍。
+    //    它只是留档（给后台看"哪些消息触发了风险判定"），失败也无所谓，
+    //    **不该让用户等它写完再开始收 AI 的回复**。
+    void execute(
+      "INSERT INTO safety_flags (user_id, category, matched, source) VALUES (?, ?, ?, ?)",
+      [user.id, safety.category, safety.name, "chat"]
+    ).catch(() => {});
+
+    // 追加在人格提示词和画像指令之后、长期记忆之前 —— 风险场景下这条优先级最高
+    systemBlock.push({ role: "system", content: SAFE_MODE_INSTRUCTION });
+
+    // ⚠️ 疑似的额外给一条判定指令。**只有它明确写 `[RISK:no]` 才会撤掉热线**；
+    //    不写、写错、写一半 —— 一律按有风险处理（见 suspected-store.js 的文件头说明）。
+    if (isSuspect) {
+      systemBlock.push({ role: "system", content: SUSPECT_INSTRUCTION });
+
+      // ⚠️ **攒疑似词**（fire-and-forget，不 await）——
+      //    后台能看出"这个词被判过 N 次日常用法"，将来决定要不要加进例外表。
+      //    只记命中的片段 + 一小段上下文，**不记完整原话**。
+      void recordSuspected(
+        safety.matched,
+        safety.category,
+        "unknown",
+        lastUserMessage?.content || ""
+      ).catch(() => {});
+    }
+  }
+
+  const messages = [...systemBlock, ...dialogue];
 
   // ---- 压力评估（本地规则，几毫秒）----
   //
@@ -303,9 +379,26 @@ async function handleChat(request) {
       ok: result.ok,
     });
     if (!result.ok) {
-      return Response.json({ reply: FALLBACK_REPLY, fallback: true, error: result.error });
+      // ⚠️ **AI 挂了也必须有热线** —— 这条路径以前直接返回兜底文案，
+      //    把安全模式的兜底整个绕过去了。风险场景下"AI 不可用"不是少给热线的理由。
+      return Response.json({
+        reply: safeMode ? ensureHotline(FALLBACK_REPLY) : FALLBACK_REPLY,
+        fallback: true,
+        error: result.error,
+      });
     }
-    return Response.json({ reply: result.reply, fallback: false });
+
+    // ⚠️ **输出侧兜底**（安全模式下）：`SAFE_MODE_INSTRUCTION` 只是"要求"，
+    //    模型可能不照做 —— 回复短的时候尤其容易把"引导专业帮助"漏掉。
+    //    风险场景下不该赌模型的自觉。**热线是底线，这段不能删。**
+    //
+    // ⚠️ 疑似的先看 AI 有没有"翻案"：**只有它明确写了 `[RISK:no]`** 才算
+    //    "这只是日常表达"，那就把标记摘掉、也不补热线。
+    //    **其他一切情况（没写 / 写错 / 写一半）都按有风险处理** —— 见 suspected-store.js。
+    const verdict = isSuspect ? takeRiskTag(result.reply) : { text: result.reply, noRisk: false };
+    const reply = safeMode && !verdict.noRisk ? ensureHotline(verdict.text) : verdict.text;
+
+    return Response.json({ reply, fallback: false });
   }
 
   // ---------------- 流式：把上游 SSE 逐段转发给前端 ----------------
@@ -315,6 +408,15 @@ async function handleChat(request) {
   const stream = new ReadableStream({
     async start(controller) {
       const encoder = new TextEncoder();
+
+      // ⚠️ 累积这一轮 AI 的完整回复 —— 流结束后要用它做**输出侧兜底**
+      //    （安全模式下没提到热线就补一句，见下面 `sendDone()` 之前那段）
+      let fullText = "";
+
+      // ⚠️ **开头的字先攒着不发**：模型有时把 `[RISK:*]` 写在**开头**（指令要求写最后，
+      //    但它不一定照做）。一旦发出去流式就收不回来了，标记会一直挂在气泡里 ——
+      //    用户实际踩过这个。所以前 40 个字先扣住，攒够了再决定发什么。
+      let headFlushed = false;
 
       const send = (obj) => {
         try {
@@ -363,7 +465,9 @@ async function handleChat(request) {
             `[chat] 上游返回 ${upstream.status} ${upstream.statusText || ""}：`,
             String(detail).slice(0, 500)
           );
-          send({ error: FALLBACK_REPLY });
+          // ⚠️ **AI 挂了也必须有热线** —— 同非流式那条路径的道理：
+          //    上游 503 不该成为"风险场景下不给热线"的理由。
+          send({ error: safeMode ? ensureHotline(FALLBACK_REPLY) : FALLBACK_REPLY });
           sendDone();
           return;
         }
@@ -390,9 +494,53 @@ async function handleChat(request) {
             try {
               const parsed = JSON.parse(data);
               const delta = parsed?.choices?.[0]?.delta?.content;
-              if (delta) send({ delta });
+              if (delta) {
+                fullText += delta;
+
+                // ⚠️ **安全模式下，前 40 个字先扣着不发** ——
+                //    模型有时把 `[RISK:*]` 写在**开头**（指令要求写最后，但它不一定照做），
+                //    而流式一旦发出去就收不回来了，标记会一直挂在气泡里（用户实际踩过）。
+                //    攒够 40 字再决定：有标记就摘掉，没有就原样发。
+                // ⚠️ 只有安全模式才走这条 —— 正常聊天不该让用户等那 40 个字。
+                if (safeMode && !headFlushed) {
+                  if (fullText.length < 40) continue;
+                  headFlushed = true;
+                  const head = takeRiskTag(fullText);
+                  send({ delta: head.found ? head.text : fullText });
+                  continue;
+                }
+
+                send({ delta });
+              }
             } catch {
               /* 忽略单行解析错误 */
+            }
+          }
+        }
+
+        // ⚠️ **输出侧兜底** —— 只在安全模式下生效。**热线是底线，这段不能删。**
+        //
+        //    为什么要放在这里：`SAFE_MODE_INSTRUCTION` 只是"要求"，模型可能不照做
+        //    （回复短的时候尤其容易把"引导专业帮助"那半句吞掉）。
+        //    风险场景下不该赌模型的自觉。
+        //
+        //    ⚠️ 补的时候把"多出来的那段"当普通 delta 发出去 ——
+        //       前端那边就是继续往气泡里追加，不需要任何新逻辑。
+        if (safeMode) {
+          // ⚠️ 疑似的先看 AI 有没有"翻案"：**只有它明确写了 `[RISK:no]`** 才算日常表达
+          const verdict = isSuspect ? takeRiskTag(fullText) : { text: fullText, noRisk: false };
+
+          // ⚠️ 流式下 `[RISK:*]` 已经一个字一个字发出去了，这里**没法"收回"** ——
+          //    所以额外发一条 `replace`：前端如果认得，就把气泡内容整体换成干净版（标记就消失了）；
+          //    不认得也不要紧，只是末尾多一行标记 —— **关键的判定逻辑不受影响**。
+          if (verdict.found) {
+            send({ replace: verdict.text });
+          }
+
+          if (!verdict.noRisk) {
+            const fixed = ensureHotline(verdict.text);
+            if (fixed.length > verdict.text.length) {
+              send({ delta: fixed.slice(verdict.text.length) });
             }
           }
         }
@@ -400,7 +548,8 @@ async function handleChat(request) {
         sendDone();
       } catch (err) {
         console.error("[chat] 调用上游失败：", err?.message || err);
-        send({ error: FALLBACK_REPLY });
+        // ⚠️ 走到这里说明连流都没建立起来 —— 同样不能漏掉热线
+        send({ error: safeMode ? ensureHotline(FALLBACK_REPLY) : FALLBACK_REPLY });
         sendDone();
       } finally {
         try {

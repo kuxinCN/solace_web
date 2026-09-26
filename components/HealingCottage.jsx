@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import FirstAid from "@/components/FirstAid";
+import ScaleQuizEntry from "@/components/ScaleQuizEntry";
 import ConfirmModal from "@/components/ConfirmModal";
 import quotesData from "@/data/quotes.json";
 
@@ -418,7 +419,10 @@ export default function HealingCottage() {
       setMResult({ phq: pRes, gad: gRes });
       setHistory((h) => ({ ...h, phq9: pRes, gad7: gRes }));
       // 提交到后端：存 PHQ-9 和 GAD-7 两个分数
-      submitAssessment("emotion", { phq9: phq, gad7: gad });
+      // ⚠️ 额外带上 **PHQ-9 第 9 题**（自伤念头）的单题分 ——
+      //    心理画像里它是"一票判高风险"的依据（见 lib/portrait.js），
+      //    被总分平均掉是不行的。第 9 题是第 9 道，索引 8。
+      submitAssessment("emotion", { phq9: phq, gad7: gad, phq9SelfHarm: next[8] ?? 0 });
     } else {
       setTimeout(() => setMStep(mStep + 1), 180);
     }
@@ -764,6 +768,32 @@ export default function HealingCottage() {
           >
             查看历史记录
           </button>
+
+          {/* ⚠️ 「更多量表」入口：PSS-10 以及后台后来上传的题库都从这里进。
+              ⚠️ 上面这三套（人格探索 / PHQ-9 / GAD-7）**一行都没动** ——
+                 它们的计分仍然在前端本地算；新那套走服务端算分（见 lib/scales.js）。 */}
+        </div>
+      </div>
+
+      {/* ⚠️ **量表测评单独成区** —— 之前它被塞在「情绪状态自评」卡片的**内部**，
+          结果继承了那张卡的宽度和边框，看起来像"情绪自评的第二块"。
+          其实它是**另一类测评**：题库由后台上传、分数在服务端算、支持反向计分，
+          和上面那三套（硬编码 + 前端算分）不是一回事。
+
+          ⚠️ 卡片样式统一用 `cardBase`，和上面两张**大小、圆角、内边距完全一致** ——
+          不这么做就会又出现"MBTI 卡片比别的大一圈"那种不齐。 */}
+      <div className="mt-4">
+        <p className="text-sm font-bold text-slate-700 px-1 pt-1 pb-3">量表测评</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div className={cardBase + " p-4 flex flex-col"}>
+            <p className="text-sm font-bold text-slate-800 mb-1">压力与情绪自评</p>
+            <p className="text-xs text-slate-400 mb-3">
+              后台可配置的标准化量表，做完能看到分数和等级
+            </p>
+            <div className="flex-1 space-y-2">
+              <ScaleQuizEntry />
+            </div>
+          </div>
         </div>
       </div>
 
