@@ -19,6 +19,7 @@ import {
   applyManualVerdict,
   createDailyDiaryTasks,
   pollBatches,
+  releaseOrphanTasks,
   scanExistingContent,
   submitPendingTasks,
 } from "@/lib/content-review";
@@ -101,7 +102,7 @@ export async function GET(request) {
 
   const payload = {
     ok: true,
-    stats: { pending: 0, submitted: 0, pass: 0, reject: 0, failed: 0, manual: 0 },
+    stats: { pending: 0, submitted: 0, pass: 0, reject: 0, failed: 0, terminated: 0, manual: 0 },
     batches: [],
     tasks: [],
     warn: "",
@@ -157,13 +158,15 @@ export async function GET(request) {
 
     // 保证每个类型都有完整的键（前端不用做 undefined 判断）
     for (const kind of Object.keys(byKind)) {
-      for (const status of ["pending", "submitted", "pass", "reject", "failed", "manual"]) {
+      for (const status of ["pending", "submitted", "pass", "reject", "failed", "terminated", "manual"]) {
         if (!byKind[kind][status]) byKind[kind][status] = 0;
       }
     }
 
     payload.statsByKind = byKind;
-    payload.stats.manual = Number(payload.stats.failed) || 0;
+    // 「待人工」= 失败的 + 被终止的（两者都需要人工留意 / 重新提交）。
+    // 兼容老前端只读了 stats.failed 的口径，这里两样一起算。
+    payload.stats.manual = (Number(payload.stats.failed) || 0) + (Number(payload.stats.terminated) || 0);
   } catch (err) {
     payload.warn = `${payload.warn} ${err?.code || err?.message || err}`.trim();
   }
@@ -322,11 +325,14 @@ export async function POST(request) {
 
   /* ---- 重试失败的任务 ---- */
   if (action === "retryFailed") {
-    // ⚠️ 把 failed 的任务打回 pending，并**把重试计数清零**。
+    // ⚠️ 把 failed / terminated 的任务打回 pending，并**把重试计数清零**。
     //
     //    平时失败任务是自动重试的（最多 2 次，见 `lib/content-review.js` 的 takePending）——
     //    这个按钮的用途是"**换过提示词 / 换过模型之后，把之前失败的那批重新跑一遍**"。
     //    计数清零是有意的：手动点一次 = 重新给满自动重试的机会。
+    //
+    //    ⚠️ `terminated`（被上游终止 / 取消）和 `failed` 一样要能重提 ——
+    //       取消只是"没跑完就结束"，内容还没被判过，需要重新提交。
     const scope = String(body.scope || "review");
     const scopeWhere =
       scope === "diary"
@@ -336,10 +342,18 @@ export async function POST(request) {
           : "AND COALESCE(task_kind, 'review') = 'review'";
 
     try {
+      // ⚠️ **先跑一次自愈**：把"批次早已终结、任务却还卡在 submitted"的孤儿
+      //    放出来（见 lib/content-review.js 的 releaseOrphanTasks）。
+      //
+      //    为什么放在这里：用户看到任务卡在「已提交」时的第一反应就是点这个按钮，
+      //    可下面的 UPDATE 只认 `failed` / `terminated` —— **根本不碰 `submitted`**。
+      //    不自愈的话，点了也是"没有失败或已终止的任务"，白点一次。
+      const orphansFixed = await releaseOrphanTasks().catch(() => 0);
+
       const result = await query(
         `UPDATE content_review_tasks
             SET status = 'pending', retry_count = 0
-          WHERE status = 'failed' ${scopeWhere}`
+          WHERE status IN ('failed', 'terminated') ${scopeWhere}`
       );
 
       const affected = Number(result?.affectedRows || 0);
@@ -348,16 +362,21 @@ export async function POST(request) {
         adminId: admin.adminId,
         username: admin.username,
         action: "review_retry_failed",
-        detail: `重试失败任务（范围 ${scope}）共 ${affected} 条`,
+        detail: `重试失败/已终止任务（范围 ${scope}）共 ${affected} 条${
+          orphansFixed ? `；顺带补正 ${orphansFixed} 条状态未跟上的任务` : ""
+        }`,
         ip: clientIp(request),
       });
 
       return json({
         ok: true,
         affected,
+        orphansFixed,
         message: affected
-          ? `已把 ${affected} 条失败任务放回待处理队列 —— 点「立即提交」就会重跑`
-          : "没有失败的任务",
+          ? `已把 ${affected} 条失败 / 已终止任务放回待处理队列 —— 点「立即提交」就会重跑`
+          : orphansFixed
+            ? `没有可直接重试的任务，但已补正 ${orphansFixed} 条「批次已结束、任务却卡在已提交」的记录 —— 再点一次就能重跑`
+            : "没有失败或已终止的任务",
       });
     } catch (err) {
       return jsonError(`重试失败：${err?.message || err}`, 500);

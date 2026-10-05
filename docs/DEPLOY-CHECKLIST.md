@@ -106,15 +106,26 @@ cd /www/wwwroot/solace
 npm run build
 ```
 
-**必须看到 `✓ Compiled successfully`** 才算成功。看到 `Failed to compile` 就把报错发出来。
+**判据是 `npm run build` 的退出码为 0**（末尾打印出 Route 表）。⚠️ 不要只看那一行
+`✓ Compiled successfully` —— 它在 lint 之前就打印了，lint 报 Error 时构建仍以退出码 1 结束，
+你会以为成功、直接重启，结果 `.next` 半更新：**新路由能请求到、用户端 JS 却还是旧的**。
+
+```bash
+npm run build || { echo "❌ 构建失败，别重启"; exit 1; }
+```
+
+看到 `Failed to compile` 就把报错发出来（`npm run lint` 能一次列出全部 Error）。
 
 > 如果报 `Cannot find module 'xxx'`，先跑一次 `npm install` 再 build。
 
 ### 5. 重启
 
 ```bash
-pm2 restart solace
+pm2 restart solace          # 日常更新够用
 ```
+
+> ⚠️ 改过 `ecosystem.config.js`（尤其 `node_args` / `max_memory_restart`）时必须用
+> **`pm2 delete solace && pm2 start ecosystem.config.js`** —— `node_args` 是启动参数，`pm2 restart` 不会重新读取（INC-008 / `docs/PERFORMANCE.md`）。
 
 > 确认只有这一个实例在跑：`ss -lntp | grep -E ':3000|:3001'` 应该只有 3000。
 
@@ -229,3 +240,137 @@ if (data.ok) setMood(data.mood);   // 显示成小标签
 
 > 设计约定：标签只用「温和描述」（轻快 / 平静 / 安稳 / 有点沉 / 疲惫 / 烦躁 / 孤单 / 说不清），
 > **不做评分、不做趋势对比、不用红黄绿分级配色** —— 这个产品是陪伴，不是给用户的情绪打分。
+
+---
+
+## 八、2026-10：桌宠与表情包可配置化（文件清单 + 注意事项）
+
+本次是**四批一起上线**：① 数据层 → ② 桌宠 → ③ 表情包 → ④ 文档。
+功能说明见 [CHANGELOG.md](../CHANGELOG.md) 顶部那一节。
+
+### 1. 要上传的文件
+
+**新增（15 个）**
+
+```
+lib/pet-store.js                          桌宠内容读写 + 播种
+lib/sticker-store.js                      表情包分类/素材读写 + 播种 + 配置缓存
+app/api/pet/route.js                      用户端桌宠配置（公开）
+app/api/stickers/route.js                 用户端表情包资源表（公开）
+app/api/admin/pet/images/route.js         形象库 CRUD
+app/api/admin/pet/images/upload/route.js  形象上传
+app/api/admin/pet/images/active/route.js  设为当前形象
+app/api/admin/pet/moods/route.js          情绪选项 CRUD
+app/api/admin/pet/lines/route.js          回复话术 CRUD
+app/api/admin/stickers/route.js           素材 CRUD
+app/api/admin/stickers/categories/route.js 分类 CRUD
+app/api/admin/stickers/upload/route.js    素材上传
+app/api/admin/stickers/scan/route.js      重新扫描目录
+components/PetPanel.jsx                   后台「桌宠」面板
+components/StickerPanel.jsx               后台「表情包」面板
+docs/PET.md                               桌宠技术文档
+```
+
+**修改（主要几个）**
+
+```
+lib/sticker-engine.js     分类/词表/优先级改成"读注入的 spec"，只留出厂默认（⚠️ 这批最核心的改动）
+lib/settings.js           新增 pet / sticker 两个配置分组
+lib/schema.js             注册 5 张新表 + 老库自动播种
+db/schema.sql             同上（5 张表）
+app/api/chat/route.js     表情包：读分类 spec + 总开关
+app/chat/page.js          桌宠与表情包都改成进站预取配置
+app/admin/page.js         新增「桌宠」「表情包」两个标签页
+components/ButterflyEffect.jsx  形象/尺寸/情绪/话术改为 props，低垂改读 droop 字段
+docs/STICKER.md、docs/API.md、docs/README.md、README.md、docs/OPERATIONS.md、
+docs/PERFORMANCE.md、docs/DEV-HISTORY.md、CHANGELOG.md
+```
+
+### 2. ⚠️ 三个必须知道的注意事项
+
+1. **不用手动建表**，但**要触发一次**：新表与播种挂在 `ensureUserColumnsOnce()` 上（老库升级链），
+   部署后**访问一次后台任意页或用户页**就会自动建 5 张表 + 播种 4 个分类与磁盘上已有的 4 张素材。
+   想更稳妥就直接执行一次 `db/schema.sql`（全是 `CREATE TABLE IF NOT EXISTS`）。
+2. **上传的素材不在数据库里**：桌宠形象在 `public/pets/`、表情包素材在 `public/stickers/<分类>/`。
+   打包上传**不会删掉**服务器上已有的文件（`\cp -rf` 只覆盖不删除），所以线上已有的素材是安全的；
+   但**备份/迁移时要一起带走**（见 OPERATIONS.md 第一节第 5 条）。
+   ⚠️ 反过来：在**本地**后台上传的图，线上没有这个文件 → 破图。本地测完请把那张形象删掉 / 停用。
+3. **必须 `npm run build` + 重启**：本次改了 `lib/sticker-engine.js`（聊天热路径）与两个页面，
+   不重启的话跑的仍是旧代码。老规矩：`pm2 delete solace && pm2 start ecosystem.config.js`。
+
+### 3. 上线后三分钟自检
+
+```bash
+curl -s http://127.0.0.1:3000/api/health            # {"ok":true,...}
+curl -s http://127.0.0.1:3000/api/pet               # 里面应有 5 条情绪
+curl -s http://127.0.0.1:3000/api/stickers          # 里面应有 4 个分类、各 1 张图
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/api/admin/pet/images   # 401（未登录，正常）
+```
+
+然后登录后台，确认顶部多了「**桌宠**」「**表情包**」两个标签页，且都能列出现有内容。
+
+### 4. 回滚
+
+代码回滚即可。新加的 5 张表留着无害（旧代码不读它们），
+`settings` 里多出的 `pet` / `sticker` 两个分组也无害；
+但**已经发出去的表情包标记**（`[sticker:xxx]`）在旧代码里同样能被渲染，所以历史消息不受影响。
+
+---
+
+## 九、2026-10：语音朗读标签（文件清单 + 注意事项）
+
+功能说明见 [CHANGELOG.md](../CHANGELOG.md) 顶部那一节，细则见 [`TTS.md`](./TTS.md)。
+**没有新表、没有新配置分组** —— 三个新字段挂在已有的 `tts` 分组上，由默认值自动补齐，
+**老库不需要任何升级动作**。
+
+### 1. 要上传的文件
+
+**新增（2 个）**
+
+```
+lib/tts-tags.js                            标签协议 + 剥离规则 + 提示词指令（前后端共用，唯一的规则实现）
+app/api/tts/config/route.js                用户端语音配置（公开，只回 5 个字段）
+```
+
+**修改（8 个）**
+
+```
+lib/settings.js                            DEFAULTS.tts 增加 styleTags / styleTagWords / eventTagWords
+lib/daily-memory.js                        每日记忆汇总：喂 AI 前剥掉 AI 侧标签
+app/api/chat/route.js                      注入标签指令（并行读 tts 配置）+ 回喂历史前剥标签
+app/api/tts/route.js                       配置只读一次；非 MiMo 时发上游前剥掉标签
+app/api/user/conversations/title/route.js  生成标题前剥掉标签
+app/chat/page.js                           进站拉 /api/tts/config；气泡渲染剥标签（含流式防闪）
+app/admin/page.js                          「语音 TTS」页新增开关 + 两个词表
+README.md / docs/*.md                      文档（见第九节第 3 条…即本节下面的说明）
+```
+
+### 2. 注意事项
+
+1. **必须 `npm run build` + 重启**：改了 `lib/tts-tags.js`（聊天热路径）、
+   `app/api/chat/route.js`、`app/chat/page.js` 三个"不重启就是旧代码"的位置。
+   老规矩：`pm2 delete solace && pm2 start ecosystem.config.js`（顺序见本文第三节）。
+2. ⚠️ **线上已于 2026-10-03 切到小米 MiMo（`mimo-chat`），所以这次上线后用户端立刻能看到效果**：
+   AI 回复会带 `[温柔]` 这类标签（存进数据库），但气泡里显示的是剥掉标签的干净文字。
+   换回 OpenAI 兼容协议（`openai-compatible`）则自动回到"不生成、仍旧剥"的安静状态。
+3. **换回 OpenAI 兼容时不用改代码**：标签不会被生成，历史消息里的旧标签也会在朗读前剥掉。
+4. **验收要看数据库**：气泡里看不到标签的同时，`messages.content` 里**必须还有标签** ——
+   这是"存原文、显示剥离"的分界线，别把剥离做进了存库那一步。
+
+### 3. 上线后三分钟自检
+
+```bash
+curl -s http://127.0.0.1:3000/api/health        # {"ok":true,...}
+curl -s http://127.0.0.1:3000/api/tts/config    # 应含 styleTags / styleTagWords / eventTagWords，且不含 apiKey
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:3000/api/tts   # 401（未登录，正常）
+```
+
+然后登录后台，确认「语音 TTS」页多了「**朗读标签**」开关和两个词表（词表里应是官方那两张表）。
+⚠️ 三个新字段是**默认值补齐**的，所以后台一打开就能看到，不需要先保存一次。
+
+### 4. 回滚
+
+代码回滚即可。`settings` 里多出的三个字段对旧代码无害（旧代码不读它们），
+**已经存进库的消息里带的标签**在旧代码里会**直接显示在气泡里**（旧代码不剥）——
+这是唯一可见的残留。真要清掉就回滚后再把这几条消息的标签手工删掉，
+或者干脆**不回滚**（新代码在非 MiMo 配置下的行为与旧代码一致）。

@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
- * 「记忆库」弹窗：查看 / 手动新增 / 删除长期记忆。
+ * 「记忆库」弹窗：查看 / 手动新增 / 删除长期记忆（支持多选批量删除）。
  *
  * props:
  *   open        是否显示
@@ -11,7 +11,8 @@ import { useState } from "react";
  *   loading     列表加载中
  *   onClose     关闭回调
  *   onAdd(text) 新增，返回 Promise<boolean>（true = 成功，输入框会清空）
- *   onDelete(id) 删除
+ *   onDelete(id) 删除单条
+ *   onDeleteMany(ids) 批量删除（交给父组件打开删除确认弹窗）
  */
 export default function MemoriesModal({
   open,
@@ -20,11 +21,61 @@ export default function MemoriesModal({
   onClose,
   onAdd,
   onDelete,
+  onDeleteMany,
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(() => new Set());
+
+  // 确认弹窗由父组件持有：标记「批量删除已提交」，等选中项从列表消失后自动退出多选
+  const pendingBatchRef = useRef(false);
+
+  // 弹窗关闭时重置多选状态
+  useEffect(() => {
+    if (!open) {
+      setSelectMode(false);
+      setSelectedIds(new Set());
+      pendingBatchRef.current = false;
+    }
+  }, [open]);
+
+  // 提交批量删除后，选中的记忆从列表里消失 → 清空选中并退出多选模式
+  useEffect(() => {
+    if (!pendingBatchRef.current || !selectedIds.size) return;
+    const alive = new Set(memories.map((m) => m.id));
+    const kept = [...selectedIds].filter((id) => alive.has(id));
+    if (kept.length !== selectedIds.size) {
+      pendingBatchRef.current = false;
+      setSelectedIds(new Set(kept));
+      setSelectMode(false);
+    }
+  }, [memories, selectedIds]);
 
   if (!open) return null;
+
+  function toggleSelect(id) {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = memories.length > 0 && selectedIds.size === memories.length;
+
+  function toggleSelectAll() {
+    setSelectedIds(allSelected ? new Set() : new Set(memories.map((m) => m.id)));
+  }
+
+  /** 把选中项交给父组件走「删除 / 彻底删除」确认弹窗 */
+  function handleBatchDelete() {
+    const ids = [...selectedIds];
+    if (!ids.length || typeof onDeleteMany !== "function") return;
+    pendingBatchRef.current = true;
+    onDeleteMany(ids);
+  }
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -72,15 +123,48 @@ export default function MemoriesModal({
             <div className="flex items-baseline gap-2">
               <h3 className="text-base font-bold text-slate-800">记忆库</h3>
               {memories.length > 0 && (
-                <span className="text-xs text-slate-400">共 {memories.length} 条</span>
+                <span className="text-xs text-slate-400">
+                  {selectMode ? `已选 ${selectedIds.size} 条` : `共 ${memories.length} 条`}
+                </span>
               )}
             </div>
-            <button
-              onClick={onClose}
-              className="text-slate-400 hover:text-slate-600 text-lg leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-[#eef4f8] transition-colors"
-            >
-              ×
-            </button>
+            <div className="flex items-center gap-1">
+              {memories.length > 0 &&
+                !loading &&
+                (selectMode ? (
+                  <>
+                    <button
+                      onClick={toggleSelectAll}
+                      className="text-xs text-[#6b98b4] hover:text-[#5a87a3] px-2 py-1 rounded-md hover:bg-[#eef4f8] transition-colors"
+                    >
+                      {allSelected ? "取消全选" : "全选"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        pendingBatchRef.current = false;
+                        setSelectMode(false);
+                        setSelectedIds(new Set());
+                      }}
+                      className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1 rounded-md hover:bg-[#eef4f8] transition-colors"
+                    >
+                      取消
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={() => setSelectMode(true)}
+                    className="text-xs text-slate-400 hover:text-slate-600 px-2 py-1 rounded-md hover:bg-[#eef4f8] transition-colors"
+                  >
+                    多选
+                  </button>
+                ))}
+              <button
+                onClick={onClose}
+                className="text-slate-400 hover:text-slate-600 text-lg leading-none w-8 h-8 flex items-center justify-center rounded-full hover:bg-[#eef4f8] transition-colors"
+              >
+                ×
+              </button>
+            </div>
           </div>
 
           {/* 新增：输入框 + 保存 */}
@@ -117,8 +201,38 @@ export default function MemoriesModal({
                 {memories.map((m, i) => (
                   <div
                     key={m.id}
-                    className="group rounded-xl border border-[#e8eae7] bg-white px-4 py-3 flex items-start gap-3"
+                    onClick={selectMode ? () => toggleSelect(m.id) : undefined}
+                    className={`rounded-xl bg-white px-4 py-3 flex items-start gap-3 ${
+                      selectMode
+                        ? selectedIds.has(m.id)
+                          ? "border border-[#8fb3c7] bg-[#f2f7fa] cursor-pointer"
+                          : "border border-[#e8eae7] cursor-pointer"
+                        : "border border-[#e8eae7]"
+                    }`}
                   >
+                    {selectMode && (
+                      <span
+                        className={`shrink-0 w-5 h-5 mt-0.5 rounded-full border flex items-center justify-center transition-colors duration-150 ${
+                          selectedIds.has(m.id)
+                            ? "bg-[#7fa8c4] border-[#7fa8c4]"
+                            : "border-[#c9cfcc] bg-white"
+                        }`}
+                      >
+                        {selectedIds.has(m.id) && (
+                          <svg
+                            className="w-3 h-3 text-white"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="3"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          >
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                        )}
+                      </span>
+                    )}
                     <div className="flex-1 min-w-0">
                       <p className="text-xs text-slate-400">
                         {formatMemoryDate(m.created_at, i, memories)}
@@ -127,11 +241,15 @@ export default function MemoriesModal({
                         {m.content}
                       </p>
                     </div>
-                    <button
-                      onClick={() => onDelete?.(m.id)}
-                      title="删除这条记忆"
-                      className="shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors duration-150"
-                    >
+                    {!selectMode && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onDelete?.(m.id);
+                        }}
+                        title="删除这条记忆"
+                        className="shrink-0 w-6 h-6 rounded-md flex items-center justify-center text-slate-300 hover:text-red-500 hover:bg-red-50 transition-colors duration-150"
+                      >
                       <svg
                         className="w-3.5 h-3.5"
                         viewBox="0 0 24 24"
@@ -147,12 +265,29 @@ export default function MemoriesModal({
                         <line x1="10" y1="11" x2="10" y2="17" />
                         <line x1="14" y1="11" x2="14" y2="17" />
                       </svg>
-                    </button>
+                      </button>
+                    )}
                   </div>
                 ))}
               </div>
             )}
           </div>
+
+          {/* 多选模式底部操作栏（固定在弹窗底部，不随列表滚动） */}
+          {selectMode && (
+            <div className="border-t border-[#e8eae7] px-5 py-3 flex items-center justify-between">
+              <span className="text-xs text-slate-400">
+                已选 {selectedIds.size} / {memories.length} 条
+              </span>
+              <button
+                onClick={handleBatchDelete}
+                disabled={selectedIds.size === 0}
+                className="border border-[#e5c9c9] bg-[#fdf6f6] text-red-500 rounded-lg px-4 py-2 text-sm hover:bg-[#fbecec] active:scale-[0.98] transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100"
+              >
+                删除所选{selectedIds.size > 0 ? `（${selectedIds.size}）` : ""}
+              </button>
+            </div>
+          )}
         </div>
       </div>
     </>

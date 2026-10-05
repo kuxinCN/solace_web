@@ -15,8 +15,8 @@
 |---|---|
 | **只保留一个实例** | pm2 和宝塔「Node 项目」**二选一**。两个都跑会出现「改代码一半生效」「域名 502」—— 见下方方式 A / 方式 B |
 | **端口** | 应用固定跑 **3000**（`ecosystem.config.js` 里写死），Nginx 反代必须指向 3000 |
-| **构建前后** | `pm2 stop solace` → `npm run build` → `pm2 start solace`。**构建很吃内存**，服务器内存小于 2G 时务必先停应用再构建 |
-| **构建成功判据** | 必须看到 `✓ Compiled successfully`。看到 `Killed` 说明内存不足，先加 2G swap |
+| **部署顺序** | **先 `npm run build`，构建成功后再 `pm2 delete solace && pm2 start ecosystem.config.js`** —— 停服务的步骤排最后，SSH 断了最坏只是"没更新"（INC-014）。只有内存 <2G 才需要先 `pm2 stop`，且把 `stop → build → start` 整段交给脚本 / `nohup` 跑，**别手敲 `&&` 链**；`.next` 不用删 |
+| **构建成功判据** | **`npm run build` 的退出码为 0**（末尾会打印出 Route 表）。⚠️ **不能只看 `✓ Compiled successfully`** —— 它在 lint 之前就打印，lint 报 Error 时构建照样以退出码 1 结束，`.next` 会半更新（新路由写了、清单还指着旧 chunk → 用户端 JS 不更新）。看到 `Killed` 说明内存不足，先加 2G swap |
 | **拿到新代码后** | 先 `npm install`（本项目依赖会更新，例如 `react-easy-crop`） |
 | **改了代码没变化** | `build` 后**必须重启进程**；浏览器用无痕窗口或 `Ctrl+F5` 强刷 |
 | **报 `Build failed because of webpack errors`** | 真正原因在上面几行，执行 `npm run build 2>&1 \| grep -A4 "Can't resolve"` 直接看缺什么 |
@@ -277,10 +277,11 @@ chmod 600 .env.local
 
 ```bash
 cd /www/wwwroot/solace
-npm run build
+npm run build || { echo "❌ 构建失败（退出码 $?）—— 别重启，线上还在跑旧代码"; exit 1; }
 ```
 
-✅ **检查点**：最后输出一堆路由表 + `✓ Compiled successfully`，没有 `Failed to compile`。
+✅ **检查点**：**退出码 0**，且最后打印出一堆路由表、没有 `Failed to compile`。
+⚠️ 单独出现 `✓ Compiled successfully` **不算成功** —— 它在 lint 之前就打印了。
 
 ⚠️ **构建失败常见原因**：
 

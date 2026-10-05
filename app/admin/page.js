@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import ConfirmModal from "@/components/ConfirmModal";
 import ContentReviewPanel from "@/components/ContentReviewPanel";
 import DiaryTaskPanel from "@/components/DiaryTaskPanel";
 import FloatingAlert from "@/components/FloatingAlert";
 import KeywordManager from "@/components/KeywordManager";
+import PetPanel from "@/components/PetPanel";
+import StickerPanel from "@/components/StickerPanel";
 import PortraitPanel from "@/components/PortraitPanel";
 import ScaleManagerPanel from "@/components/ScaleManagerPanel";
 import StressDiagnosePanel from "@/components/StressDiagnosePanel";
@@ -128,6 +131,46 @@ const FIELDS = {
       label: "网易云访问不了时自动降级到本地歌单",
       type: "boolean",
       hint: "音源选「网易云收藏」时，前端会先探测用户能否访问 music.163.com；访问不了就自动切回本地歌单，避免浮窗一片空白",
+    },
+  ],
+  pet: [
+    {
+      key: "enabled",
+      label: "启用桌宠（蓝蝴蝶）",
+      type: "boolean",
+      hint: "关闭后用户端不再显示蝴蝶。形象库、情绪选项、回复话术都会保留，重新打开即恢复",
+    },
+    {
+      key: "size",
+      label: "显示边长（px，40-160）",
+      type: "number",
+      hint: "⚠️ 这个数字同时参与蝴蝶的初始定位、拖动边界、气泡位置、飞行目标四处计算 —— 调大之后小屏手机上更容易贴边",
+    },
+    {
+      key: "lineRepeatHours",
+      label: "同一句回复多久内不重复（小时，0 = 不限制）",
+      type: "number",
+      hint: "点中一条情绪后，桌宠会从这条情绪的回复里随机挑一句；这个时间内说过的最近几句不会再出现（记录存在用户浏览器本地，不落库、不发请求）",
+    },
+    {
+      type: "section",
+      key: "_secPetContent",
+      label: "形象 / 情绪 / 话术",
+      hint: "下面的面板管这三样：形象库（多张可切换，含「当前用哪张」）、用户能点的情绪选项、每条情绪的回复话术",
+    },
+  ],
+  sticker: [
+    {
+      key: "enabled",
+      label: "启用表情包",
+      type: "boolean",
+      hint: "关闭后聊天不再自动发任何表情包（连情绪判定也不做）。分类与素材都会保留，重新打开即恢复",
+    },
+    {
+      type: "section",
+      key: "_secStickerContent",
+      label: "分类与素材",
+      hint: "下面的面板管两样：分类（= 情绪：关键词词表、优先级、深夜放宽、是否可主动发图）与每类的素材图片",
     },
   ],
   safety: [
@@ -327,6 +370,26 @@ const FIELDS = {
       type: "textarea",
       rows: 3,
       hint: "用自然语言描述想要的语气，会作为 user 消息发给 MiMo（例如：用温柔、缓慢、轻声细语的语调朗读）。留空则不发送；OpenAI 兼容协议会忽略这项。",
+    },
+    {
+      key: "styleTags",
+      label: "朗读标签（情绪 / 声音事件，仅小米 MiMo 生效）",
+      type: "boolean",
+      hint: "开着时，AI 会在回复里自然带上 [温柔]、(叹气) 这类标签，MiMo 朗读时按标签控语气；用户看到的气泡里这些标签会被自动去掉（存库保留原文，供朗读用）。⚠️ 接口类型不是「小米 MiMo」时本项自动失效：标签既不会被生成，历史消息里的旧标签也会在朗读前被剥掉（否则会被一字一顿念出来）。想彻底关掉就用这个开关。",
+    },
+    {
+      key: "styleTagWords",
+      label: "语气标签词表（仅小米 MiMo）",
+      type: "textarea",
+      rows: 5,
+      hint: "一份词表两处用：① 提示词里告诉 AI 只能从这些词里选；② 用户端剥离标签的白名单。默认 = 官方推荐表（基础情绪 / 复合情绪 / 整体语调 / 音色定位 / 人设腔调 / 方言 / 角色扮演 / 唱歌）。逗号分隔。⚠️ 清空 = 恢复默认值，别用清空来关功能；⚠️ 删掉某个词 = AI 不再用它、用户端也不再剥它（会漏到屏幕上），所以缩表要谨慎。",
+    },
+    {
+      key: "eventTagWords",
+      label: "声音事件词表（仅小米 MiMo）",
+      type: "textarea",
+      rows: 5,
+      hint: "同上（吸气 / 深呼吸 / 叹气 / 轻笑 / 哽咽 ……）。官方推荐表里没有、但官方样例里出现过的词（苦笑、沉默、停顿、小声 之类）很实用 —— 想让 AI 也能用、并且用户端也能剥掉，就往这里加（逗号分隔）。",
     },
     { key: "timeoutSeconds", label: "超时（秒）", type: "number" },
   ],
@@ -582,6 +645,8 @@ const TABS = [
   { id: "review", label: "数据审核" },
   { id: "diary", label: "日记" },
   { id: "music", label: "背景音乐" },
+  { id: "pet", label: "桌宠" },
+  { id: "sticker", label: "表情包" },
   { id: "mail", label: "邮箱 / 验证码" },
   { id: "users", label: "用户管理" },
   { id: "userdata", label: "用户数据" },
@@ -1448,6 +1513,8 @@ function MusicTracksPanel({ setError, setNotice }) {
   const [neteaseType, setNeteaseType] = useState("2");
   // 管理员备注：只在后台显示，用户端拿不到
   const [adminNote, setAdminNote] = useState("");
+  // 自定义确认弹窗（替代 window.confirm）：{ message, confirmText, onConfirm }
+  const [confirmBox, setConfirmBox] = useState(null);
   const fileRef = useRef(null);
 
   const load = useCallback(async () => {
@@ -1491,10 +1558,20 @@ function MusicTracksPanel({ setError, setNotice }) {
   async function handleImport(event) {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (!window.confirm("导入会新增歌单与音频文件。继续？")) {
-      event.target.value = "";
-      return;
-    }
+    // 弹窗是异步的，先把文件存到 ref，确认后还能取到
+    fileRef.current = file;
+    setConfirmBox({
+      message: "导入会新增歌单与音频文件。继续？",
+      confirmText: "继续导入",
+      onConfirm: () => doImport(),
+    });
+  }
+
+  async function doImport() {
+    setConfirmBox(null);
+    const file = fileRef.current;
+    fileRef.current = null;
+    if (!file) return;
     setBusy("import");
     setError("");
     setNotice("");
@@ -1517,7 +1594,6 @@ function MusicTracksPanel({ setError, setNotice }) {
       setError("导入失败：" + err.message);
     } finally {
       setBusy("");
-      event.target.value = "";
     }
   }
 
@@ -1570,10 +1646,16 @@ function MusicTracksPanel({ setError, setNotice }) {
     }
   }
 
-  async function handleRemove(track) {
-    if (!window.confirm(`删除「${track.title}」？${track.source === "local" ? "本地文件也会一起删掉。" : ""}`)) {
-      return;
-    }
+  function handleRemove(track) {
+    setConfirmBox({
+      message: `删除「${track.title}」？${track.source === "local" ? "本地文件也会一起删掉。" : ""}`,
+      confirmText: "删除",
+      onConfirm: () => doRemove(track),
+    });
+  }
+
+  async function doRemove(track) {
+    setConfirmBox(null);
     setBusy(`del-${track.id}`);
     try {
       await api(`/api/admin/music?id=${encodeURIComponent(track.id)}`, { method: "DELETE" });
@@ -1833,6 +1915,15 @@ function MusicTracksPanel({ setError, setNotice }) {
           ))}
         </ul>
       )}
+
+      {/* 自定义确认弹窗（替代 window.confirm） */}
+      <ConfirmModal
+        open={!!confirmBox}
+        message={confirmBox?.message || ""}
+        confirmText={confirmBox?.confirmText || "确认删除"}
+        onConfirm={confirmBox?.onConfirm || (() => {})}
+        onClose={() => setConfirmBox(null)}
+      />
     </section>
   );
 }
@@ -2167,6 +2258,8 @@ function UsersPanel({ setError, setNotice, onViewData }) {
   const [savingFields, setSavingFields] = useState(false);
   const [form, setForm] = useState(null); // null 表示弹窗关闭
   const [busy, setBusy] = useState(false);
+  // 自定义确认弹窗（替代 window.confirm）
+  const [confirmBox, setConfirmBox] = useState(null);
   const pageSize = 20;
 
   async function load(overrides = {}) {
@@ -2274,12 +2367,16 @@ function UsersPanel({ setError, setNotice, onViewData }) {
     }
   }
 
-  async function removeUser(user) {
-    const ok = window.confirm(
-      `确定删除用户「${user.email}」吗？\n他的聊天记录和日记也会一起删除，且不可恢复。`
-    );
-    if (!ok) return;
+  function removeUser(user) {
+    setConfirmBox({
+      message: `确定删除用户「${user.email}」吗？\n他的聊天记录和日记也会一起删除，且不可恢复。`,
+      confirmText: "删除用户",
+      onConfirm: () => doRemoveUser(user),
+    });
+  }
 
+  async function doRemoveUser(user) {
+    setConfirmBox(null);
     setError("");
     setNotice("");
     try {
@@ -2305,8 +2402,16 @@ function UsersPanel({ setError, setNotice, onViewData }) {
     }
   }
 
-  async function clearPassword(user) {
-    if (!window.confirm("确定清空该用户的密码吗？之后他只能用邮箱验证码登录。")) return;
+  function clearPassword(user) {
+    setConfirmBox({
+      message: "确定清空该用户的密码吗？之后他只能用邮箱验证码登录。",
+      confirmText: "清空密码",
+      onConfirm: () => doClearPassword(user),
+    });
+  }
+
+  async function doClearPassword(user) {
+    setConfirmBox(null);
     setError("");
     setNotice("");
     try {
@@ -2682,6 +2787,15 @@ function UsersPanel({ setError, setNotice, onViewData }) {
           </form>
         </div>
       ) : null}
+
+      {/* 自定义确认弹窗（替代 window.confirm） */}
+      <ConfirmModal
+        open={!!confirmBox}
+        message={confirmBox?.message || ""}
+        confirmText={confirmBox?.confirmText || "确认删除"}
+        onConfirm={confirmBox?.onConfirm || (() => {})}
+        onClose={() => setConfirmBox(null)}
+      />
     </div>
   );
 }
@@ -2699,6 +2813,8 @@ function UserDataPanel({ initialUserId, setError, setNotice }) {
   const [activeConv, setActiveConv] = useState(null);
   const [messages, setMessages] = useState([]);
   const [busy, setBusy] = useState(false);
+  // 自定义确认弹窗（替代 window.confirm）
+  const [confirmBox, setConfirmBox] = useState(null);
   // 防止快速切换用户时，旧请求的响应盖掉新数据
   const requestIdRef = useRef(0);
 
@@ -2774,9 +2890,16 @@ function UserDataPanel({ initialUserId, setError, setNotice }) {
     }
   }
 
-  async function removeItem(type, id, label) {
-    if (!window.confirm(`确定删除${label}吗？此操作不可恢复。`)) return;
+  function removeItem(type, id, label) {
+    setConfirmBox({
+      message: `确定删除${label}吗？此操作不可恢复。`,
+      confirmText: "删除",
+      onConfirm: () => doRemoveItem(type, id, label),
+    });
+  }
 
+  async function doRemoveItem(type, id, label) {
+    setConfirmBox(null);
     setError("");
     setNotice("");
     try {
@@ -3069,6 +3192,15 @@ function UserDataPanel({ initialUserId, setError, setNotice }) {
           </p>
         </section>
       )}
+
+      {/* 自定义确认弹窗（替代 window.confirm） */}
+      <ConfirmModal
+        open={!!confirmBox}
+        message={confirmBox?.message || ""}
+        confirmText={confirmBox?.confirmText || "确认删除"}
+        onConfirm={confirmBox?.onConfirm || (() => {})}
+        onClose={() => setConfirmBox(null)}
+      />
     </div>
   );
 }
@@ -3662,6 +3794,36 @@ export default function AdminPage() {
               onSaved={loadAll}
             />
             <MusicTracksPanel setError={setError} setNotice={setNotice} />
+          </>
+        ) : null}
+
+        {tab === "pet" ? (
+          <>
+            <SettingsGroup
+              group="pet"
+              title="桌宠设置"
+              description="桌宠是用户端左下角（默认在屏幕中下方）那只可以拖动的蓝蝴蝶：点它会弹出一排情绪按钮，选一个就播对应的动画并说一句陪伴的话。这里管三件事 —— ① 开关与显示边长；② 形象库（可以放多张，指定用哪一张）；③ 情绪选项与回复话术（每条情绪可挂多句，随机挑一句，同一句在去重时间内不重复）。"
+              settings={settings}
+              setError={setError}
+              setNotice={setNotice}
+              onSaved={loadAll}
+            />
+            <PetPanel api={api} setError={setError} setNotice={setNotice} onSaved={loadAll} />
+          </>
+        ) : null}
+
+        {tab === "sticker" ? (
+          <>
+            <SettingsGroup
+              group="sticker"
+              title="表情包设置"
+              description="聊天时按用户这句话的情绪自动配一张表情包：先扫关键词（毫秒级、零成本），判不出才交给 AI 判一次；然后按「第 1 句 0%、第 2 句 40%、第 3 句 100% 保底」的节奏随机发出，同一种情绪发出后冷却 15 分钟、两张之间至少隔 5 轮。这里管总开关；分类（有哪些情绪、靠哪些词判定、优先级、深夜是否放宽）与素材图片在下面的面板里增删改。"
+              settings={settings}
+              setError={setError}
+              setNotice={setNotice}
+              onSaved={loadAll}
+            />
+            <StickerPanel api={api} setError={setError} setNotice={setNotice} onSaved={loadAll} />
           </>
         ) : null}
 

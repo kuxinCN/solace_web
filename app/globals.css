@@ -51,6 +51,136 @@ body {
   }
 }
 
+/* 日记涂抹·空内容轻提示：快速淡入、停留、末尾淡出（总时长 1.9s） */
+@keyframes diary-empty-tip {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  12% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  82% {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -6px);
+  }
+}
+
+/* ============================== 呼吸放松·双层水波纹 ==============================
+ *
+ * ⚠️ A / B 必须分层、不能共用 transform：
+ *   A（.ripple ×3）—— 外围同心涟漪：只做 transform: scale + opacity，
+ *                     是 .breath-circle 的兄弟节点，不跟随呼吸缩放；
+ *   B（.breath-wave）—— 呼吸圈边缘起伏：只做 border-radius 形变，
+ *                     是 .breath-circle 的子节点，靠父级继承位移、自身绝不动 transform。
+ *   呼吸缩放本身在 .breath-circle 上（4s 吸 / 2s 停 / 6s 呼，--breath-cycle=12s）。
+ * 两组动画都只在 .breath-wrap.is-active（运行中）时挂载，暂停/结束即整体停止。
+ */
+
+/* A：一圈涟漪从呼吸圈边缘向外扩散并淡出（水滴落水面的同心波纹）。
+ * 透明度在后半程才快速衰减：吸气时圆圈放大到 1.5，涟漪在下层会被遮住，
+ * 等呼气收缩、涟漪露出圆圈边缘时仍保持可见，像"随呼气荡开的波纹"。 */
+@keyframes breath-ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.5;
+  }
+  55% {
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+/* B：呼吸圈边缘轻微起伏（±2~4%，幅度刻意压小，像水波不像果冻）。
+ * 只动 border-radius，不碰 transform / box-shadow / filter。 */
+@keyframes breath-wave-morph {
+  0% {
+    border-radius: 50% 50% 50% 50%;
+  }
+  25% {
+    border-radius: 48% 52% 51% 49%;
+  }
+  50% {
+    border-radius: 52% 48% 49% 51%;
+  }
+  75% {
+    border-radius: 49% 51% 52% 48%;
+  }
+  100% {
+    border-radius: 50% 50% 50% 50%;
+  }
+}
+
+/* 呼吸节奏总周期（吸 4s + 停 2s + 呼 6s = 12s），涟漪时长/错峰都从它派生 */
+.breath-wrap {
+  --breath-cycle: 12s;
+  position: relative;
+  width: 7rem; /* 与呼吸圈静止尺寸一致（w-28），涟漪从圈边缘起步 */
+  height: 7rem;
+}
+
+/* 呼吸圈本体：缩放节奏只发生在这一层（inline style 控制 transform + transition） */
+.breath-circle {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
+}
+
+/* A 层：三层同心细圆环，默认不可见；运行中才挂动画 */
+.breath-wrap .ripple {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(201, 139, 164, 0.55); /* 半透明暖粉 #C98BA4 */
+  opacity: 0;
+  pointer-events: none; /* 涟漪只是视觉层，不挡任何点击 */
+  will-change: transform, opacity; /* A 只有 transform + opacity，走合成层不触发重排 */
+}
+
+.breath-wrap.is-active .ripple {
+  /* 一次涟漪 ≈ 呼吸周期的 1/3（4s） */
+  animation: breath-ripple calc(var(--breath-cycle) / 3) ease-out infinite;
+}
+
+/* 三层在"一次涟漪时长"内三等分错开（用负延迟让打开瞬间三层已在途中）。
+ * 注：若按字面各延迟 1/3 呼吸周期（=一次完整涟漪时长），三层会同相重叠、
+ * 没有连续扩散感；故改为各错 1/3 涟漪时长（≈呼吸周期的 1/9），
+ * 视觉上每 ~1.3s 推出一圈新波纹，三层首尾相接。 */
+.breath-wrap.is-active .ripple-2 {
+  animation-delay: calc(var(--breath-cycle) / -9);
+}
+.breath-wrap.is-active .ripple-3 {
+  animation-delay: calc(var(--breath-cycle) / -9 * 2);
+}
+
+/* B 层：覆盖在呼吸圈上的薄层，用 border 显示波动轮廓。
+ * 默认透明无边框；运行中淡入轮廓并开始 border-radius 形变（约 7s 一圈，独立于呼吸节奏）。 */
+.breath-wave {
+  position: absolute;
+  inset: 0;
+  border: 2px solid rgba(201, 139, 164, 0);
+  border-radius: 50%;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.breath-wrap.is-active .breath-wave {
+  border-color: rgba(201, 139, 164, 0.7);
+  opacity: 0.55; /* 透明度静态给定，不参与动画 —— B 只动 border-radius */
+  animation: breath-wave-morph 7s ease-in-out infinite;
+}
+/* ============================== /呼吸放松·双层水波纹 ============================== */
+
 @layer utilities {
   /* 品牌展示字体：仅用于「Solace」品牌字与欢迎页大标题（衬线，安静而有文气） */
   .font-display {

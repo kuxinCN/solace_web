@@ -71,6 +71,27 @@ gunzip < backups/solace-20260919-030001.sql.gz | mysql -u root -p solace
 
 > **建议**：把备份再复制一份到**别的机器或网盘**（比如每天 rsync 拉回自己电脑）。同一台服务器上的备份，遇到磁盘故障时一起丢。
 
+### 5. ⚠️ 数据库备份**不包含上传的图片文件**
+
+后台能上传的东西是「**文件 + 数据库记录**」的组合，而 `backup-db.sh` 只备份数据库：
+
+| 内容 | 文件在哪 | 数据库备份里有吗 |
+|---|---|---|
+| 用户头像 / 聊天背景 | 数据库里（base64） | ✅ 一起备份了 |
+| 桌宠形象（后台「形象库」上传的） | `public/pets/` | ❌ **文件要自己带走** |
+| 表情包素材（后台上传的） | `public/stickers/<分类>/` | ❌ **文件要自己带走** |
+| 背景音乐（本地曲目） | `public/music/` | ❌ **文件要自己带走** |
+
+所以完整的备份 = 数据库 dump **+** 上面那几个目录。
+换服务器 / 迁移时只恢复数据库的话，后台列表里会看到一堆**打不开的图**
+（记录在、文件不在），用户端的桌宠也会变成破图。
+
+顺手加一条每天打包素材的 cron（放在 3 点数据库备份之后）：
+
+```bash
+0 4 * * * cd /www/wwwroot/solace && tar czf backups/assets-$(date +\%F).tar.gz public/pets public/stickers public/music >> logs/backup.log 2>&1
+```
+
 ---
 
 ## 二、pm2 日志轮转（防止磁盘被撑爆）
@@ -198,8 +219,8 @@ cd /www/wwwroot/solace
 pm2 list
 ss -lntp | grep -E ':3000|:3001'
 
-# 2. 构建（一定要看到 ✓ Compiled successfully）
-npm run build
+# 2. 构建（判据＝退出码 0；只看 ✓ Compiled successfully 会被 lint 骗过去）
+npm run build || { echo "❌ 构建失败，别重启"; exit 1; }
 
 # 3. 重启
 pm2 restart solace

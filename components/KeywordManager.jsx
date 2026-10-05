@@ -17,6 +17,7 @@
  *    （这个坑踩过一次：「测试」和「保存」都报「缺少词表 id」。）
  */
 import { useCallback, useEffect, useState } from "react";
+import ConfirmModal from "@/components/ConfirmModal";
 
 const BTN =
   "rounded-lg border border-[#e2e5e2] bg-white px-2.5 py-1 text-[11px] text-slate-500 transition hover:border-[#c9d2c9] hover:text-slate-700 disabled:opacity-40";
@@ -108,6 +109,8 @@ export default function KeywordManager({ api, setError, setNotice }) {
   const [testText, setTestText] = useState("");
   const [testResult, setTestResult] = useState(null);
   const [suspected, setSuspected] = useState([]);
+  // 自定义确认弹窗（替代 window.confirm）
+  const [confirmBox, setConfirmBox] = useState(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -154,14 +157,21 @@ export default function KeywordManager({ api, setError, setNotice }) {
       const before = (group.content || []).length;
       const after = content.length;
       if (after < before) {
-        const ok = window.confirm(
-          `「${group.label}」的条目会从 ${before} 条变成 ${after} 条。\n\n` +
-            "⚠️ 删除后可能导致风险消息漏判 —— 确定要删吗？"
-        );
-        if (!ok) return;
+        setConfirmBox({
+          message:
+            `「${group.label}」的条目会从 ${before} 条变成 ${after} 条。\n\n` +
+            "⚠️ 删除后可能导致风险消息漏判 —— 确定要删吗？",
+          confirmText: "确定删除",
+          onConfirm: () => doSave(group, content),
+        });
+        return;
       }
     }
 
+    await doSave(group, content);
+  }
+
+  async function doSave(group, content) {
     setBusy(group.id);
     try {
       const data = await api("/api/admin/keywords", {
@@ -181,12 +191,17 @@ export default function KeywordManager({ api, setError, setNotice }) {
   async function toggle(group) {
     // ⚠️ 停用安全词表风险很高，问一句
     if (group.safety && group.enabled) {
-      const ok = window.confirm(
-        `确定要停用「${group.label}」吗？\n\n停用后这类风险**不再识别**（不是"降低权重"，是完全不查）。`
-      );
-      if (!ok) return;
+      setConfirmBox({
+        message: `确定要停用「${group.label}」吗？\n\n停用后这类风险**不再识别**（不是"降低权重"，是完全不查）。`,
+        confirmText: "确定停用",
+        onConfirm: () => doToggle(group),
+      });
+      return;
     }
+    await doToggle(group);
+  }
 
+  async function doToggle(group) {
     setBusy(group.id);
     try {
       await api("/api/admin/keywords", {
@@ -202,9 +217,14 @@ export default function KeywordManager({ api, setError, setNotice }) {
   }
 
   async function reset(group) {
-    const ok = window.confirm(`把「${group.label}」恢复成内置默认内容？当前内容会被覆盖。`);
-    if (!ok) return;
+    setConfirmBox({
+      message: `把「${group.label}」恢复成内置默认内容？当前内容会被覆盖。`,
+      confirmText: "恢复默认",
+      onConfirm: () => doReset(group),
+    });
+  }
 
+  async function doReset(group) {
     setBusy(group.id);
     try {
       await api("/api/admin/keywords", {
@@ -470,6 +490,15 @@ export default function KeywordManager({ api, setError, setNotice }) {
           这里只记录，**不会自动改词表** —— 自动改就意味着某天会静默漏掉一个真危机。
         </p>
       </div>
+
+      {/* 自定义确认弹窗（替代 window.confirm） */}
+      <ConfirmModal
+        open={!!confirmBox}
+        message={confirmBox?.message || ""}
+        confirmText={confirmBox?.confirmText || "确认删除"}
+        onConfirm={confirmBox?.onConfirm || (() => {})}
+        onClose={() => setConfirmBox(null)}
+      />
     </div>
   );
 }

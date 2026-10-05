@@ -102,6 +102,8 @@
 | ⛔ **提示词里不要给具体的情绪示例** | 模型对示例的模仿远强于对规则的遵守 —— 你写"比如你提到今天很累"，它就真的会对开心的日记说"我读到你很累" |
 | ⚠️ **中文内容匹配注意词边界** | `sb` 会命中 `absorb`、`tm` 会命中 `atm`；拼音缩写必须用词边界 |
 | ⚠️ **让模型输出结构化结果时，优先"行首标记"而不是 JSON** | 批量推理里 JSON 太容易坏。格式：`标签：xxx` / `标题：xxx` / `正文：`（后面全是正文） |
+| ⛔ **给模型看的词表不要带英文等效值** | 模型对英文词特别敏感：词表里有 `sing` 它就会直接吐 `sing`，而且容易忘掉括号 —— **裸写的 `sing` 会被 TTS 念出来**（听成"信"），少个右括号的 `[sing` 更是把整句合成变成乱码。`buildTtsTagInstruction` 只把中文词给模型看，英文值只留在剥离白名单里兜底 |
+| ⚠️ **流式朗读切句不能切进标签** | 朗读是逐句切、逐句合成的，切句只看标点，而多词标签自带逗号（`[紧张，深呼吸]`）正好落在刀口上。切出半截标签 → MiMo 把半截当正文，**整句变乱码**。用 `hasOpenBracketTail()` 兜底退回待切，流结束时 `dropOpenBracketTail()` 丢掉残截 |
 
 ---
 
@@ -114,8 +116,11 @@
 | **加新配置分组要三处同步** | `GROUPS` 数组、`DEFAULTS`、以及后台 `FIELDS`。漏了 `GROUPS` 会报"未知的配置分组" |
 | **`mysql2` 的 DATE 列出来是 JS Date 对象** | 直接 JSON 出去是带时区的 ISO 串，前端切字符串会切错（严重时差一天）。要手动裁成 `YYYY-MM-DD` |
 | **PM2 的两个内存参数必须对齐** | `max_memory_restart` 和 `--max-old-space-size` 只设一个 = 定时炸弹（表现是安静地反复重启，日志里没报错） |
-| **构建吃内存** | 小内存服务器：先 `pm2 stop` 再 build，并加 swap |
+| **构建吃内存** | 小内存服务器加 swap；确实要先停应用时，把 `stop → build → start` 整段交给脚本 / `nohup` 跑，**别手敲 `&&` 链**（INC-014） |
+| **`next build` 不认"导入了不存在的命名导出"** | 只给警告、构建照样成功，直到真请求那个接口才崩（`TypeError: xxx is not a function`）。新增跨模块 import 后**必须实际请求一次该接口**（INC-001） |
 | **浏览器缓存** | `Failed to find Server Action "x"` 这类报错通常是浏览器拿着旧页面，无害；用无痕或 Ctrl+F5 |
+| **`✓ Compiled successfully` ≠ 构建成功** | 这一行在 **lint 之前**就打印了。ESLint 报 Error（比如 `react/no-unescaped-entities`：JSX 文本里的裸 `"`）时，构建会以**退出码 1** 结束 —— 但屏幕上你已经看到"Compiled successfully"了，于是以为成功、直接重启 → `.next` 处于半更新状态：**新路由写了、清单还指着旧 chunk** → "服务端像更新了、用户端 JS 还是旧的"，严重时 `next start` 起不来（502）。判据只能是**退出码 0 + 末尾 Route 表**：`npm run build \|\| { echo 构建失败; exit 1; }` |
+| **PowerShell 5.1 只认带 BOM 的 UTF-8** | 脚本里有中文注释时，存成**无 BOM** 的 UTF-8 会被按 GBK 解，整份脚本解析失败 —— 报的却是「Try statement is missing its Catch or Finally block」这种看不懂的错。`scripts/package.ps1` 就是这么挂的。⚠️ `pwsh`（7）两种都能读，所以只在 7 里测过发现不了 —— 验证要用 `powershell -File`。<br>📌 **项目约定：`.ps1` 一律存成「UTF-8 with BOM」**（纯 ASCII 的也加，省得以后往里加中文注释时踩同一个坑）。改完自查：`[IO.File]::ReadAllBytes($p)[0..2]` 应为 `EF BB BF` |
 
 ---
 
@@ -123,25 +128,58 @@
 
 ### 本地打包（Windows / PowerShell）
 
+> ✅ **首选：直接跑项目自带的 `scripts/package.ps1`**（命令行或右键「使用 PowerShell 运行」），
+> 它会自动排除下面那些目录 / 文件、并在**项目上一级目录**生成 zip。下面这段手工命令是它的等价版本。
+
 ```powershell
 # 打包成部署用的 zip（排除 node_modules / .next / 配置）
-# 已验证多次，产物默认放 E:\ai web project\solace-deploy.zip
 robocopy <源码目录> <临时目录> /E /XD "<源码目录>\node_modules" "<源码目录>\.next" "<源码目录>\.vercel" "<源码目录>\.git" "<源码目录>\.reasonix" "<源码目录>\logs" "<源码目录>\backups" "<源码目录>\config" /XF .env.local db.json installed.lock
+
+# ⚠️ 排除**目录**一定要写完整路径 —— 裸目录名（/XD logs）会匹配任意层级的同名目录。
+#    实测它把项目的 `app/api/admin/logs/`（后台日志接口）一起排掉了：
+#    包里少一个接口文件、部署后那一页坏掉，而打包日志看着一切正常。
+#    （排除**文件**可以用裸名，比如 db.json / installed.lock 的位置变过。）
+
+# ⚠️ 建包**不要**用 ZipFile.CreateFromDirectory —— Windows 上它把路径写成反斜杠
+#    （`lib\tts-tags.js`），而 ZIP 规范与 Linux 的 unzip 只认正斜杠。
+#    后果很隐蔽：解包出一堆名字带 `\` 的垃圾文件，`\cp -rf` 全"成功"了，代码却没更新。
+#    要手工建包就照 scripts/package.ps1 里那段逐条 CreateEntry(...) 的写法（把 \ 换成 /）。
+#    打完自查（必须是 0）：
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-[System.IO.Compression.ZipFile]::CreateFromDirectory(<临时目录>, <zip 路径>)
+$z = [System.IO.Compression.ZipFile]::OpenRead(<zip 路径>)
+"含反斜杠的条目：$(@($z.Entries.FullName -match '\\').Count)"
+$z.Dispose()
 ```
 
 ### 服务器部署（CentOS）
 
 ```bash
+# ① 上传解包（不影响线上）
 cd /tmp && rm -rf sp && mkdir sp && unzip -o /tmp/solace-deploy.zip -d sp
 \cp -rf /tmp/sp/. /www/wwwroot/solace/
-cd /www/wwwroot/solace && pm2 stop solace && rm -rf .next && npm run build && pm2 delete solace && pm2 start ecosystem.config.js
+
+# ② 先构建 —— 这期间线上仍跑旧版，就算断了也只是"没更新"
+cd /www/wwwroot/solace
+npm run build || { echo "❌ 构建失败（退出码 $?）—— 别重启，线上还在跑旧代码"; exit 1; }
+# ⚠️ 判据是**退出码 0 + 末尾打印出 Route 表**，**不是**只看 `✓ Compiled successfully`：
+#    那一行在 lint 之前就打印了 —— lint 报 Error 时构建照样以退出码 1 结束，
+#    `.next` 会停在"编译产物已写、清单/HTML 还指着旧 chunk"的**半更新状态**。
+#    现象：新路由接口能请求到，用户端 JS 却还是旧的；严重时 next start 起不来 → 502。
+
+# ③ 构建成功之后再切换（只要几秒）
+pm2 delete solace && pm2 start ecosystem.config.js
 ```
 
-**⚠️ 两个都不能省**：
-- `rm -rf .next` —— 不删会出现 `Could not find a production build`
-- `\cp -rf` —— 服务器上 `cp` 有 `-i` 别名
+**⚠️ 顺序不能反**（INC-014 的教训）：
+- **"会停服务"的步骤永远排在最后。** 旧写法 `pm2 stop solace && rm -rf .next && npm run build && pm2 delete && pm2 start`
+  是一条 `&&` 链，SSH 一断就停在中间 —— "进程停了、产物删了、构建没跑完" → 整站 down；
+- **`rm -rf .next` 可以省** —— `next build` 自己会覆盖。要删只是为了清残缺产物，
+  并且要认清「`Could not find a production build`」的根因是**构建没成功**，不是"没删 `.next`"（INC-002 / INC-014）；
+- **只有内存不够（<2G 且没加 swap）才需要先停应用** —— 这时把 `stop → build → start` 整段写进脚本，
+  或用 `nohup sh -c '...' &` 跑完，让它断线也能走完，**不要手敲 `&&` 链**；
+- **`\cp -rf` 不能省** —— 服务器上 `cp` 有 `-i` 别名。
+
+> 改完代码的日常更新流程（build → restart → 验证）见 `docs/OPERATIONS.md` 第六节。
 
 ### 排障
 

@@ -21,7 +21,7 @@ const btnBase =
 const btnPrimary =
   "border border-[#7fa3b8] bg-[#7fa3b8] text-white rounded-xl hover:bg-[#6c93a8] active:scale-[0.98] transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed";
 
-export default function ScaleQuiz({ onClose, initialScaleId = "" }) {
+export default function ScaleQuiz({ onClose, onSubmitted, initialScaleId = "" }) {
   const [scales, setScales] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -121,13 +121,15 @@ export default function ScaleQuiz({ onClose, initialScaleId = "" }) {
         setError(data?.error || "提交失败");
       } else {
         setResult(data.result || {});
+        // 通知父组件重拉「已测评 / 最近一次」状态（数据库为准）
+        try { onSubmitted?.(active?.id); } catch { /* 忽略 */ }
       }
     } catch (err) {
       setError(err?.message || "网络异常");
     } finally {
       setSubmitting(false);
     }
-  }, [active, answers]);
+  }, [active, answers, onSubmitted]);
 
   /* ------------------------------------------------------------ 结果页 */
   if (result) {

@@ -3,12 +3,25 @@
 import { useState, useEffect, useRef } from "react";
 
 // 急救箱条目：呼吸放松 / 蝴蝶拍 触发动画弹窗，安全提示展开文字
+// ⚠️ 每个工具都带一句"看得懂"的说明 —— 光有名字用户不知道蝴蝶拍是干嘛的
 const KIT_ITEMS = [
-  { id: "breath", label: "呼吸放松" },
-  { id: "butterfly", label: "蝴蝶拍" },
+  {
+    id: "breath",
+    label: "呼吸放松",
+    icon: "🌬",
+    hint: "跟着圆环吸气、停一停、慢慢呼气，让心跳慢下来",
+  },
+  {
+    id: "butterfly",
+    label: "蝴蝶拍",
+    icon: "🦋",
+    hint: "双手交替轻拍肩膀，像蝴蝶扇动翅膀，安抚紧绷的身体",
+  },
   {
     id: "safety",
     label: "安全提示",
+    icon: "🛟",
+    hint: "情绪太满时，一句写给自己的安全提醒",
     text: "如果你有伤害自己的念头，请立刻告诉身边你信任的人，或拨打全国心理援助热线 400-161-9995，或 110 / 120 求助。你不需要一个人扛着，也不是你的错。",
   },
 ];
@@ -27,10 +40,10 @@ function BreathingAnimation({ onClose }) {
   // 卸载时清理计时器
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
-  // 状态机推进：吸气4秒、屏住2秒、呼气4秒
+  // 状态机推进：吸气4秒、屏住2秒、呼气6秒
   useEffect(() => {
     if (!running || phase === "done") return;
-    const duration = phase === "hold" ? 2000 : 4000;
+    const duration = phase === "hold" ? 2000 : phase === "exhale" ? 6000 : 4000;
     timerRef.current = setTimeout(() => {
       if (phase === "inhale") {
         setPhase("hold");
@@ -77,12 +90,18 @@ function BreathingAnimation({ onClose }) {
     setRunning(true);
   };
 
-  // 圆圈缩放：吸气/屏住放大到 1.5，呼气/静止/完成回到 1
+  // 圆圈缩放：吸气/屏住放大到 1.5，呼气/静止/完成回到 1。
+  // transform 只挂在 .breath-circle 这一层，A 涟漪和 B 边缘波动都不能共用它。
   const scale = phase === "inhale" || phase === "hold" ? 1.5 : 1;
   const transition =
-    phase === "inhale" || phase === "exhale"
+    phase === "inhale"
       ? "transform 4s ease-in-out"
+      : phase === "exhale"
+      ? "transform 6s ease-in-out"
       : "transform 0.3s ease";
+
+  // A/B 两组水波纹只在"运行中（未完成）"挂载动画；暂停 / 结束 / 未开始时整体静止
+  const effectsActive = running && phase !== "done";
 
   const phaseText = {
     idle: "准备好了吗？",
@@ -101,15 +120,27 @@ function BreathingAnimation({ onClose }) {
         className="bg-white rounded-2xl shadow-xl border border-[#e8eae7] p-8 w-96 flex flex-col items-center"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 圆圈（初始静止，浅蓝色） */}
+        {/* 呼吸引导：A 外围涟漪（兄弟层，只做 scale/opacity）+
+            B 边缘波动（呼吸圈子层，只做 border-radius）+
+            呼吸圈本体缩放（transform 只在 .breath-circle）。三层 DOM 解耦。 */}
         <div className="relative w-56 h-56 flex items-center justify-center mb-2">
           <div
-            className="w-28 h-28 rounded-full bg-[#a9c6da] shadow-lg"
-            style={{
-              transform: `scale(${scale})`,
-              transition,
-            }}
-          />
+            className={`breath-wrap${effectsActive ? " is-active" : ""}`}
+            style={{ "--breath-cycle": "12s" }}
+          >
+            <div className="ripple ripple-1" />
+            <div className="ripple ripple-2" />
+            <div className="ripple ripple-3" />
+            <div
+              className="breath-circle rounded-full bg-[#a9c6da] shadow-lg"
+              style={{
+                transform: `scale(${scale})`,
+                transition,
+              }}
+            >
+              <div className="breath-wave" />
+            </div>
+          </div>
         </div>
 
         {/* 文字提示 */}
@@ -139,13 +170,23 @@ function BreathingAnimation({ onClose }) {
   );
 }
 
-// 蝴蝶拍动画：两只手掌交替轻拍，左拍1秒、右拍1秒，循环进行直到关闭
+// 蝴蝶拍动画：原来的两只手掌已删除，节拍由全局桌宠蝴蝶承担
 // 按钮逻辑与呼吸放松完全一致
-function ButterflyAnimation({ onClose }) {
+function ButterflyAnimation({ onClose, onStateChange }) {
   const [running, setRunning] = useState(false);
   // idle | leftUp | leftDown | rightUp | rightDown
   const [phase, setPhase] = useState("idle");
   const timerRef = useRef(null);
+
+  // 向父组件上报状态
+  const report = (r, p) => {
+    onStateChange?.({ open: true, running: r, phase: p });
+  };
+
+  useEffect(() => {
+    report(false, "idle"); // 打开时 idle
+    return () => onStateChange?.({ open: false, running: false, phase: "idle" });
+  }, []); // eslint-disable-line
 
   useEffect(() => () => clearTimeout(timerRef.current), []);
 
@@ -160,6 +201,11 @@ function ButterflyAnimation({ onClose }) {
     }, 500);
     return () => clearTimeout(timerRef.current);
   }, [running, phase]);
+
+  // phase 变化时上报
+  useEffect(() => {
+    report(running, phase);
+  }, [running, phase]); // eslint-disable-line
 
   // 关闭按钮：运行中 → 停止动画、重置、不关闭弹窗；idle → 关闭弹窗
   const handleClose = () => {
@@ -185,16 +231,6 @@ function ButterflyAnimation({ onClose }) {
     setRunning(true);
   };
 
-  // 左掌在 leftUp 时放大+上移，否则静止
-  const leftActive = phase === "leftUp";
-  const leftScale = leftActive ? 1.15 : 1;
-  const leftTranslate = leftActive ? -6 : 0;
-
-  // 右掌在 rightUp 时放大+上移，否则静止
-  const rightActive = phase === "rightUp";
-  const rightScale = rightActive ? 1.15 : 1;
-  const rightTranslate = rightActive ? -6 : 0;
-
   const phaseText =
     phase === "leftUp" || phase === "leftDown"
       ? "左拍…"
@@ -208,32 +244,21 @@ function ButterflyAnimation({ onClose }) {
       onClick={handleBackdrop}
     >
       <div
+        data-butterfly-pat-card
         className="bg-white rounded-2xl shadow-xl border border-[#e8eae7] p-8 w-96 flex flex-col items-center"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* 两只手掌：左掌 + 右掌（镜像） */}
-        <div className="flex items-center justify-center gap-10 w-full h-40 mb-2">
-          <div
-            className="text-6xl select-none"
-            style={{
-              transform: `translateY(${leftTranslate}px) scale(${leftScale})`,
-              transition: "transform 0.5s ease-in-out",
-              opacity: leftActive ? 1 : 0.7,
-            }}
-          >
-            🖐
+        {/* 使用方法说明（删掉手掌后空出的位置）—— 开始后瞬间清空，无过渡 */}
+        {!running && (
+          <div className="w-full min-h-[100px] flex items-center justify-center mb-2">
+            <p className="text-sm leading-6 text-slate-600 text-center px-2">
+              双手交叉抱在胸前，左手放在右肩，右手放在左肩。<br />
+              左右交替轻轻拍打，像蝴蝶扇动翅膀一样。<br />
+              一边拍一边深呼吸，慢慢来。
+            </p>
           </div>
-          <div
-            className="text-6xl select-none"
-            style={{
-              transform: `translateY(${rightTranslate}px) scale(${rightScale}) scaleX(-1)`,
-              transition: "transform 0.5s ease-in-out",
-              opacity: rightActive ? 1 : 0.7,
-            }}
-          >
-            🖐
-          </div>
-        </div>
+        )}
+        {running && <div className="w-full min-h-[100px] mb-2" />}
 
         {/* 文字提示 */}
         <p className="text-base font-medium text-slate-700">{phaseText}</p>
@@ -259,7 +284,7 @@ function ButterflyAnimation({ onClose }) {
   );
 }
 
-export default function FirstAid({ initialMethod = "", allowedIds = null }) {
+export default function FirstAid({ initialMethod = "", allowedIds = null, onButterflyPatChange }) {
   const [activeId, setActiveId] = useState("");
   const [breathing, setBreathing] = useState(false);
   const [butterfly, setButterfly] = useState(false);
@@ -286,15 +311,24 @@ export default function FirstAid({ initialMethod = "", allowedIds = null }) {
 
   return (
     <div className="space-y-2">
-      {KIT_ITEMS.map((item) => (
-        <button
-          key={item.id}
-          onClick={() => handleClick(item.id)}
-          className={`${btnBase} p-2.5 w-full text-left`}
-        >
-          {item.label}
-        </button>
-      ))}
+      {/* 三个疗愈工具：图标 + 名称 + 一句话说明（手机竖排，桌面横排） */}
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+        {KIT_ITEMS.map((item) => (
+          <button
+            key={item.id}
+            onClick={() => handleClick(item.id)}
+            className={`${btnBase} p-3 text-left`}
+          >
+            <span className="block text-xl leading-none">{item.icon}</span>
+            <span className="mt-1 block text-sm font-semibold text-slate-700">
+              {item.label}
+            </span>
+            <span className="mt-1 block text-[11px] leading-4 text-slate-400">
+              {item.hint}
+            </span>
+          </button>
+        ))}
+      </div>
 
       {/* 安全提示 文字 */}
       {activeId && (
@@ -317,6 +351,7 @@ export default function FirstAid({ initialMethod = "", allowedIds = null }) {
       {/* 蝴蝶拍动画 */}
       {butterfly && (
         <ButterflyAnimation
+          onStateChange={onButterflyPatChange}
           onClose={() => {
             setButterfly(false);
           }}

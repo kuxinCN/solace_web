@@ -166,14 +166,8 @@ export default function Home() {
         });
         showMessage("登录成功", "success");
       }
-      // 登录成功：给聊天页留一个「一次性欢迎标记」——
-      // 只有真正走完登录流程才会写，所以欢迎页只在登录之后出现；
-      // 聊天页读到就立刻删掉，因此**刷新页面不会再弹**。
-      try {
-        sessionStorage.setItem("solace_show_welcome", "1");
-      } catch {
-        /* 隐私模式下写不进去也没关系，最多是不显示欢迎页 */
-      }
+      // 欢迎页已经移到进站入口（`/`）了：用户是先在 `/` 看过欢迎页、
+      // 点箭头才来到这里的，所以登录成功后直接进聊天页，不再重播欢迎页。
       router.push("/chat");
     } catch (err) {
       showMessage("登录失败：" + err.message, "error");

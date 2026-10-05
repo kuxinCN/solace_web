@@ -7,15 +7,22 @@ import ProfileView from "@/components/ProfileView";
 import TrashModal from "@/components/TrashModal";
 import DeleteChoiceModal from "@/components/DeleteChoiceModal";
 import { readMessageCache, removeMessageCache, writeMessageCache } from "@/lib/message-cache";
+import {
+  dropOpenBracketTail,
+  hasOpenBracketTail,
+  isStyleTagsEnabled,
+  stripTtsTags,
+  tagWordsFrom,
+} from "@/lib/tts-tags";
 import MoodPicker, { MoodBadge } from "@/components/MoodPicker";
 import BioModal from "@/components/BioModal";
 import AboutModal from "@/components/AboutModal";
 import FavoritesModal from "@/components/FavoritesModal";
 import MemoriesModal from "@/components/MemoriesModal";
 import ImageCropper from "@/components/ImageCropper";
-import WelcomeOverlay from "@/components/WelcomeOverlay";
 import StressMeter from "@/components/StressMeter";
 import RelaxPopup from "@/components/RelaxPopup";
+import ButterflyEffect from "@/components/ButterflyEffect";
 import { useAvatarUpload, currentImageWriteSeq, markLocalImageWrite, mergeLocalImageWrites } from "@/lib/use-avatar-upload";
 
 // 统一的数据请求封装：所有后端 REST 调用都走这里
@@ -112,12 +119,12 @@ const SYSTEM_PROMPT = `你是一个安静的陪伴者，也是一个会笑的朋
 每句一行，气泡一样弹出来。
 每次两到四句，最多五句。
 不用加粗、标题、列表、编号。
-你可以在合适的时机发一张表情包。
-需要发时，在回复末尾单独一行输出标记，格式如 [sticker:happy]。
-可用分类：happy、comfort、daily、sleep。
-每 5 条回复最多用一次，不要每条都发。
-低落或安静场景不要发。
 直接说话，不写"总结"之类的开头结尾。
+
+你记得他之前随口说过的事。
+当用户说出**长期稳定**的个人信息、偏好或重要事实时，
+在回复末尾单独一行输出标记 [MEMORY:一句话]。
+只记真实说过的，不编造，不每条都记；日常寒暄、当下情绪不需要记。
 
 先感受他，再回应他。
 他开心，你跟着闹。
@@ -144,7 +151,12 @@ function splitAiSegments(content) {
 
 /**
  * 表情包资源表：public/stickers/<分类>/<文件名>。
- * 浏览器端读不了目录（fs.readdir 用不了），新增图片时手动把文件名加到这里。
+ * 浏览器端读不了目录（fs.readdir 用不了），所以这张表有两个来源：
+ *   * 内置的四个分类（下面这份，接口挂了 / 表没建好时的兜底）；
+ *   * **进站时用 `GET /api/stickers` 就地改写这个对象**（后台配的分类与素材）。
+ * ⚠️ 之所以就地把模块级对象改掉，而不是换个 state：解析标记（parseStickerMark）、
+ *    SSE 事件处理、历史消息渲染全是同步代码，它们引用的是这个对象；
+ *    换成 state 会让这些同步路径读到旧值（表现是"后台传了新图，要刷新两次才看到"）。
  * 文件名含中文，取 src 时会做 encodeURIComponent。
  */
 const STICKER_MAP = {
@@ -249,7 +261,23 @@ function drainSentences(pending, flush, eager = false) {
     sentences.push(remaining.slice(0, cut));
     remaining = remaining.slice(cut);
   }
-  if (flush && remaining.trim()) sentences.push(remaining);
+  if (flush) {
+    // 文本流结束：把每句结尾那截"没闭合的括号"丢掉再发，别让最后一句崩成乱码
+    for (let i = 0; i < sentences.length; i += 1) {
+      sentences[i] = dropOpenBracketTail(sentences[i]);
+    }
+    const trimmed = dropOpenBracketTail(remaining);
+    if (trimmed.trim()) sentences.push(trimmed);
+    remaining = "";
+  } else if (sentences.length) {
+    // ⚠️ 别在"没打完的括号"里切句（见 lib/tts-tags.js 的 OPEN_BRACKET_TAIL_RE）：
+    // 把断在括号里的那句连同后面的句子一起退回剩余文本，等标签闭合后再切。
+    const bad = sentences.findIndex((s) => hasOpenBracketTail(s));
+    if (bad >= 0) {
+      remaining = sentences.slice(bad).join("") + remaining;
+      sentences.length = bad;
+    }
+  }
   return { sentences, rest: flush ? "" : remaining };
 }
 
@@ -345,6 +373,8 @@ const MessageRow = memo(
   function MessageRow({
     m,
     isUser,
+    ttsTagWords,
+    holdTagPartial,
     renderKey,
     revealed,
     stickerSrc,
@@ -362,7 +392,15 @@ const MessageRow = memo(
     messageRefs,
   }) {
     // AI 消息按 \n 切成多段，模拟真人连发短消息（表情包标记行不算文字）
-    const segments = isUser ? [] : splitAiSegments(parseStickerMark(m.content).text);
+    // ⚠️ 朗读标签在这里剥掉：库里存的是**带标签的原文**（TTS 要靠它控语气），
+    //    但屏幕上不能出现 `[温柔]` 这种东西。用户消息一律不动 —— 用户自己打的括号是内容。
+    //    holdTagPartial：正在流式输出的那条要挡住"开了口还没闭合"的半截标签。
+    const rawText = parseStickerMark(m.content).text;
+    const segments = isUser
+      ? []
+      : splitAiSegments(
+          ttsTagWords ? stripTtsTags(rawText, ttsTagWords, { holdPartial: holdTagPartial }) : rawText
+        );
     // 已完成分段 + 正在输入的分段（如果 revealed 还没到末尾）
     const visibleCount = Math.min(revealed + 1, segments.length);
     const showSegments = segments.slice(0, visibleCount);
@@ -431,7 +469,9 @@ const MessageRow = memo(
               {/* 喇叭按钮：空闲喇叭 / 加载中旋转 / 播放中暂停；点击区 ≥44px */}
               <button
                 type="button"
-                onClick={() => handlers.current.onToggleTts(m.id, m.content, m.ck)}
+                onClick={() =>
+                  handlers.current.onToggleTts(m.id, parseStickerMark(m.content).text, m.ck)
+                }
                 title={
                   ttsPlayingId === m.id || ttsPlayingCk === m.ck
                     ? "暂停"
@@ -767,28 +807,699 @@ function ConversationGroups({
   );
 }
 
+/* ---------------- 日记编辑区：情绪释放（涂抹）交互 ---------------- */
+
+/**
+ * 往哪走：写日记烦躁的时候，按住编辑区反复涂抹 → 文字逐渐模糊变灰
+ * （四段视觉分级）→ 累积涂够 1350px（约 9-10 次来回）触发「灰烬飘散」，
+ * 每个字独立向上淡出 → 清空输入框，原稿进回收站（3 天内可恢复）。
+ *
+ * ⚠️ 四个必须守住的点（踩过的坑）：
+ *   ① **pointermove 里绝对不能 setState** —— 全部改 ref.current.style，
+ *      否则每移动一像素都重渲染，手机卡成幻灯片。
+ *   ② **不用 setPointerCapture** —— 会锁死容器，textarea 点不进光标
+ *      （悬浮球那边踩过）。用 window 级 pointermove/up。
+ *   ③ **20px 以内不算涂抹** —— 否则用户点光标 / 拖选都会触发，
+ *      太吓人。
+ *   ④ **松手不触发飘散、只暂停** —— 进度存 ref 跨手势保留，
+ *      只有 eraseProgress ≥ 100 才真吹走。
+ */
+const RELEASE_ARM_PX = 20;      // 首次激活阈值
+const RELEASE_TOTAL_PX = 1350;  // 累计这么多滑动距离才到进度 100（约 9-10 次来回）
+
+/** 进度 → 四段视觉分级（直接给 style 属性） */
+function progressToStyle(p) {
+  let blur, opacity, translateY;
+  if (p < 30) {
+    const t = p / 30;
+    blur = t * 2;              // 0 → 2
+    opacity = 1;
+    translateY = 0;
+  } else if (p < 60) {
+    const t = (p - 30) / 30;
+    blur = 2 + t * 3;          // 2 → 5
+    opacity = 1 - t * 0.15;    // 1 → 0.85
+    translateY = 0;
+  } else if (p < 90) {
+    const t = (p - 60) / 30;
+    blur = 5 + t * 4;          // 5 → 9
+    opacity = 0.85 - t * 0.15; // 0.85 → 0.7
+    translateY = -t * 5;       // 0 → -5
+  } else {
+    const t = (p - 90) / 10;
+    blur = 9 + t * 1;          // 9 → 10
+    opacity = 0.7 - t * 0.2;   // 0.7 → 0.5
+    translateY = -5 - t * 3;   // -5 → -8
+  }
+  return {
+    filter: `blur(${blur.toFixed(2)}px)`,
+    opacity: opacity.toFixed(3),
+    transform: `translateY(${translateY.toFixed(2)}px)`,
+  };
+}
+
+/**
+ * 生成字符飘散的独立 keyframe（两段式，Solace 暖色品牌意象）。
+ * 第一段 0-0.6s：颜色逐渐变暖（→ #C98BA4），透明度缓慢下降。
+ * 第二段 0.6-1.8s：向上飘起 + 随机水平偏移/旋转 + blur(2px) + 透明度归零。
+ */
+const CHAR_VARIANTS = 16; // 飘散 keyframe 变体池：随机取用 + 随机延迟，避免逐字符生成 keyframe
+
+/** 预生成 16 个两段式飘散变体（暖色化 → 上浮飘散），注入一次复用 */
+function buildCharVariantKeyframes() {
+  let css = "";
+  for (let i = 0; i < CHAR_VARIANTS; i++) {
+    const dx = ((Math.random() - 0.5) * 60).toFixed(1);   // -30 ~ +30
+    const rot = ((Math.random() - 0.5) * 30).toFixed(1);  // -15 ~ +15deg
+    const lift = (-(60 + Math.random() * 40)).toFixed(1); // -60 ~ -100
+    css += `
+@keyframes diary-release-chv-${i} {
+  0%   { opacity: 1; color: inherit; transform: translate(0,0) rotate(0deg); filter: blur(0); }
+  33%  { opacity: 0.78; color: #C98BA4; transform: translate(0,0) rotate(0deg); filter: blur(0); }
+  100% { opacity: 0; color: #C98BA4; transform: translate(${dx}px, ${lift}px) rotate(${rot}deg); filter: blur(2px); }
+}`;
+  }
+  return css;
+}
+
+const DIARY_RELEASE_BRAND_KEYFRAME = `
+@keyframes diary-release-brand {
+  0%   { opacity: 0; transform: translateY(6px); }
+  60%  { opacity: 1; transform: translateY(0); }
+  80%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(-4px); }
+}`;
+
+// ── 飘散文本拆分（性能降级）──────────────────────────────
+// ≤150 字逐字；150-400 逐词（中文 2-3 字一组、英文按词）；>400 逐行
+const RELEASE_CHAR_MAX = 150;
+const RELEASE_WORD_MAX = 400;
+const RELEASE_LINE_HARD = 44; // 逐行模式下单行仍超长时按句号切后再硬切的长度
+
+/** 逐词模式：中文 2-3 字一组、英文按空格成词、空白原样保留（保证排版不塌） */
+function releaseWordChunks(str, out) {
+  const re = /\s+|[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*|[\u4e00-\u9fff]|[^A-Za-z0-9\s\u4e00-\u9fff]/g;
+  const cjk = [];
+  const flush = () => {
+    while (cjk.length) {
+      // 剩 3 → 3 个；剩 ≥5 → 3 个；否则 2 个（避免末尾孤字）
+      const n = cjk.length === 3 ? 3 : cjk.length >= 5 ? 3 : 2;
+      out.push({ text: cjk.splice(0, n).join("") });
+    }
+  };
+  let m;
+  while ((m = re.exec(str))) {
+    const tok = m[0];
+    if (/^\s+$/.test(tok)) {
+      flush();
+      out.push({ ws: true, text: tok });
+    } else if (/[\u4e00-\u9fff]/.test(tok)) {
+      cjk.push(tok);
+    } else if (/^[A-Za-z0-9]/.test(tok)) {
+      flush();
+      out.push({ text: tok });
+    } else {
+      // 标点：粘在当前词组末尾，不单独飘
+      if (cjk.length) cjk[cjk.length - 1] += tok;
+      else if (out.length && !out[out.length - 1].ws) out[out.length - 1].text += tok;
+      else out.push({ text: tok });
+    }
+  }
+  flush();
+}
+
+/** 逐行模式：先按换行，再按句读，最后硬切（每块尽量是一整句） */
+function releaseLineChunks(str, out) {
+  const lines = str.split("\n");
+  lines.forEach((line, li) => {
+    if (li > 0) out.push({ ws: true, text: "\n" });
+    if (!line) return;
+    if (line.length <= RELEASE_LINE_HARD) {
+      out.push({ text: line });
+      return;
+    }
+    const segs = line.match(/[^。！？；!?;]+[。！？；!?;]*/g) || [line];
+    for (const s of segs) {
+      for (let i = 0; i < s.length; i += RELEASE_LINE_HARD) {
+        out.push({ text: s.slice(i, i + RELEASE_LINE_HARD) });
+      }
+    }
+  });
+}
+
+/** 按总字数选择拆分粒度，返回 { mode, perNode: [[{ws,text},...], ...] } */
+function releaseBuildChunks(textNodes) {
+  let total = 0;
+  for (const n of textNodes) total += n.nodeValue.length;
+  const mode = total <= RELEASE_CHAR_MAX ? "char" : total <= RELEASE_WORD_MAX ? "word" : "line";
+  const perNode = textNodes.map((n) => {
+    const str = n.nodeValue;
+    const items = [];
+    if (mode === "char") {
+      for (const ch of str) items.push({ text: ch });
+    } else if (mode === "word") {
+      releaseWordChunks(str, items);
+    } else {
+      releaseLineChunks(str, items);
+    }
+    return items;
+  });
+  return { mode, perNode };
+}
+
+
+/** 剥离残留 HTML 标签（<p></p>、<br>、&nbsp; 等）后判断是否为纯空白。
+ *  日记输入框本身是纯 textarea/input，这里是防止富文本残留的兜底。 */
+function releaseIsBlank(value) {
+  const text = String(value ?? "")
+    .replace(/<br\s*\/?>/gi, "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&#160;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text === "";
+}
+
+function DiaryReleaseZone({
+  children,
+  hint = "烦躁的时候，按住编辑区任意位置涂抹，让它随风走",
+  onRelease,
+  isEmpty,   // () => boolean：标题+正文是否全空（含空白/残留标签）
+}) {
+  const zoneRef = useRef(null);   // 定位上下文：飘散 clone / 品牌锚点挂这里
+  const wrapRef = useRef(null);   // 整个编辑区（标题+正文+心情+按钮）：涂抹与模糊的作用域
+  const overlayRef = useRef(null);      // 飘散动画 overlay（整区 DOM clone）
+  const progressRef = useRef(0);        // 累积进度 0-100，跨手势保留
+  const gestureRef = useRef({ down: false, armed: false, startX: 0, startY: 0, lastX: 0, lastY: 0 });
+  const cleanupTimerRef = useRef(null);
+  const triggeredRef = useRef(false);    // 是否已触发飘散（防重复）
+  const animStyleRef = useRef(null);    // 飘散动画的 <style> 节点
+
+  // 释放流程轻提示：zone 内部 fixed 全局 Toast（不依赖侧边栏，日记 tab 也可见）
+  const [tipText, setTipText] = useState("");
+  const tipTimerRef = useRef(null);
+  function flashTip(text, ms = 1900) {
+    if (!text) return;
+    setTipText(text);
+    if (tipTimerRef.current) window.clearTimeout(tipTimerRef.current);
+    tipTimerRef.current = window.setTimeout(() => setTipText(""), ms);
+  }
+
+  // props 的 ref 镜像（手势闭包里读最新值）
+  const isEmptyRef = useRef(isEmpty);
+  useEffect(() => { isEmptyRef.current = isEmpty; }, [isEmpty]);
+
+  // 拖动期间才需要 window 监听（一次手势只触发一次 re-render，不是每帧）
+  const [gestureOn, setGestureOn] = useState(false);
+  const onReleaseRef = useRef(onRelease);
+  useEffect(() => {
+    onReleaseRef.current = onRelease;
+  }, [onRelease]);
+
+  /** 卸载：清定时器 + 动态节点 */
+  useEffect(
+    () => () => {
+      if (cleanupTimerRef.current) window.clearTimeout(cleanupTimerRef.current);
+      if (tipTimerRef.current) window.clearTimeout(tipTimerRef.current);
+      animStyleRef.current?.remove();
+      overlayRef.current?.remove();
+    },
+    []
+  );
+
+  /** 飘散前用户继续打字 → 进度归零（DOM input 事件，不走 React 状态） */
+  useEffect(() => {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    const onInput = () => {
+      if (triggeredRef.current) return;
+      if (progressRef.current > 0) {
+        progressRef.current = 0;
+        clearVisualStyles();
+        askedRef.current = false;
+        confirmedRef.current = false;
+      }
+    };
+    wrap.addEventListener("input", onInput);
+    return () => wrap.removeEventListener("input", onInput);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function clearVisualStyles() {
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    wrap.style.filter = "";
+    wrap.style.opacity = "";
+    wrap.style.transform = "";
+    wrap.style.userSelect = "";
+    wrap.style.visibility = "";
+  }
+
+  function clearOverlay() {
+    if (overlayRef.current) {
+      overlayRef.current.remove();
+      overlayRef.current = null;
+    }
+  }
+
+  /** 触发飘散：整区 DOM clone → 输入框值转文字 → 逐字拆 span 飘走 */
+  function triggerDispersal() {
+    const zone = zoneRef.current;
+    const wrap = wrapRef.current;
+    if (!zone || !wrap) return;
+    triggeredRef.current = true;
+    const rect = wrap.getBoundingClientRect();
+
+    // 原区整体隐藏（等恢复定时器再显示），clone 顶上播放动画
+    wrap.style.visibility = "hidden";
+    wrap.style.pointerEvents = "none";
+
+    // 先清掉可能残留的旧 overlay / 样式
+    clearOverlay();
+    animStyleRef.current?.remove();
+
+    const clone = wrap.cloneNode(true);
+    // 剥掉涂抹期的模糊/透明等内联样式，clone 从干净状态开始飘。
+    // ⚠️ transform 保留 wrap 当前值：第 4 段分级带着 -8px 上浮，
+    //    若清零会让「隐藏→clone 顶上」的衔接处向下跳 8px。
+    Object.assign(clone.style, {
+      filter: "",
+      opacity: "",
+      transform: wrap.style.transform || "",
+      userSelect: "",
+      visibility: "visible",
+      position: "absolute",
+      left: "0",
+      top: "0",
+      margin: "0",
+      width: rect.width + "px",
+      height: rect.height + "px",
+      pointerEvents: "none",
+    });
+    clone.setAttribute("aria-hidden", "true");
+
+    // input/textarea 的值不在 DOM 文本里 → 换成装着 value 的 div，布局样式尽量对齐
+    const liveFields = wrap.querySelectorAll("input, textarea");
+    const cloneFields = clone.querySelectorAll("input, textarea");
+    cloneFields.forEach((cf, i) => {
+      const src = liveFields[i];
+      const div = document.createElement("div");
+      div.textContent = src ? String(src.value ?? "") : "";
+      if (src) {
+        const cs = window.getComputedStyle(src);
+        Object.assign(div.style, {
+          font: cs.font,
+          lineHeight: cs.lineHeight,
+          letterSpacing: cs.letterSpacing,
+          color: cs.color,
+          background: "transparent",
+          padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
+          margin: `${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft}`,
+          borderWidth: cs.borderWidth,
+          borderStyle: "solid",
+          borderColor: "transparent",
+          borderRadius: cs.borderRadius,
+          minHeight: cs.height,
+          width: "100%",
+          boxSizing: "border-box",
+          whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
+          overflow: "hidden",
+        });
+      }
+      cf.replaceWith(div);
+    });
+
+    // 按钮（保存/取消等）只剩边框底色会留在原地 → 变透明，只让文字飘
+    clone.querySelectorAll("button").forEach((btn) => {
+      btn.style.background = "transparent";
+      btn.style.borderColor = "transparent";
+      btn.style.boxShadow = "none";
+    });
+
+    // 注入变体 keyframes（一次性复用）
+    const styleEl = document.createElement("style");
+    styleEl.textContent = buildCharVariantKeyframes();
+    document.head.appendChild(styleEl);
+    animStyleRef.current = styleEl;
+
+    // 遍历所有文本节点（元素间纯空白缩进行忽略，文本内部空白保留）
+    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) =>
+        n.nodeValue && n.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
+    });
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+    // ① 按总字数分档：≤150 逐字 / 150-400 逐词 / >400 逐行
+    const { mode, perNode } = releaseBuildChunks(textNodes);
+    // ② 每个文本节点换成一个「容器 span」，动画片段后续按帧往里填
+    const queue = []; // { container, ws, text, len }，按文档顺序
+    textNodes.forEach((node, i) => {
+      const container = document.createElement("span");
+      container.style.cssText = "display:inline;white-space:pre-wrap;";
+      for (const it of perNode[i]) {
+        queue.push({
+          container,
+          ws: !!it.ws,
+          text: it.text,
+          len: it.text.length,
+        });
+      }
+      node.parentNode.replaceChild(container, node);
+    });
+
+    // 挂到 body（fixed）：编辑态触发后父组件会卸载编辑表单，
+    // clone 挂在 zone 里会被 React 一起清掉，挂 body 才能播完整条动画
+    Object.assign(clone.style, {
+      position: "fixed",
+      left: rect.left + "px",
+      top: rect.top + "px",
+      zIndex: "60",
+    });
+    document.body.appendChild(clone);
+    overlayRef.current = clone;
+
+    // ③ requestAnimationFrame 分批发车：每帧最多启动 20 个字符的动画，
+    //    避免上千个动画同帧触发导致长文本卡顿
+    let qi = 0;
+    let maxEnd = performance.now();
+    const spanWhite = mode === "line" ? "pre-wrap" : "pre";
+    function launchFrame(now) {
+      let budget = 20;
+      while (qi < queue.length && budget > 0) {
+        const job = queue[qi++];
+        if (job.ws) {
+          job.container.appendChild(document.createTextNode(job.text));
+          continue; // 空白不播动画、不占预算
+      }
+        budget -= job.len;
+        const variant = Math.floor(Math.random() * CHAR_VARIANTS);
+        const delay = Math.random() * 300;
+        const span = document.createElement("span");
+        span.textContent = job.text;
+        span.style.cssText =
+          `display:inline-block;white-space:${spanWhite};will-change:transform,opacity;` +
+          `animation:diary-release-chv-${variant} 1800ms cubic-bezier(.2,.7,.2,1) ${delay.toFixed(0)}ms forwards;`;
+        // 动画结束即摘掉 will-change，释放合成层
+        span.addEventListener(
+          "animationend",
+          () => { span.style.willChange = ""; },
+          { once: true }
+        );
+        job.container.appendChild(span);
+        maxEnd = Math.max(maxEnd, now + 1800 + delay);
+      }
+      if (qi < queue.length) {
+        requestAnimationFrame(launchFrame);
+      } else {
+        // 最后一片真实结束时刻 → 进入收尾序列
+        const wait = Math.max(0, maxEnd - performance.now()) + 50;
+        cleanupTimerRef.current = window.setTimeout(finishDispersal, wait);
+      }
+    }
+
+    // 收尾（全程不退出编辑界面）：
+    // ① 清 clone → ② 原地显示「交给 Solace」2.5s → ③ 锚点消失后清空+进回收站 → ④ 恢复可见
+    async function finishDispersal() {
+      clearOverlay();
+      animStyleRef.current?.remove();
+      animStyleRef.current = null;
+
+      // ② 编辑界面正中原地显示品牌锚点（表单仍隐藏，未跳列表）
+      showBrandAnchor(rect);
+
+      // ③ 锚点消失后：清空标题/正文 + 原稿进回收站。新建/编辑走同一个 onRelease 入口。
+      //    onRelease 返回：true/undefined=成功无提示；string=成功/失败提示文案；false/抛错=失败
+      cleanupTimerRef.current = window.setTimeout(async () => {
+        let ret;
+        try {
+          ret = await Promise.resolve(onReleaseRef.current?.());
+        } catch {
+          ret = "操作没完成，请再试一次";
+        }
+        // ④ 恢复界面可见：成功→空白编辑区（编辑模式由父组件在轻提示后自行返回列表）；
+        //    失败→父组件已把原稿放回，恢复显示即可
+        restoreAfterRelease();
+        if (typeof ret === "string") flashTip(ret, 2200);
+      }, 2600);
+    }
+
+    requestAnimationFrame(launchFrame);
+  }
+
+  /** 飘散收尾：进度归零、恢复编辑区可见与可交互（placeholder 自然出现） */
+  function restoreAfterRelease() {
+    progressRef.current = 0;
+    triggeredRef.current = false;
+    askedRef.current = false;
+    confirmedRef.current = false;
+    const wrap = wrapRef.current;
+    if (!wrap) return;
+    wrap.style.visibility = "";
+    wrap.style.pointerEvents = "";
+    wrap.style.filter = "";
+    wrap.style.opacity = "";
+    wrap.style.transform = "";
+    wrap.style.userSelect = "";
+  }
+
+  /** 在原编辑区位置显示品牌锚点文字，淡入淡出后自移除。
+   *  挂 body + fixed：编辑态触发飘散后表单会卸载，挂在 zone 里会被一起清掉。 */
+  function showBrandAnchor(rect) {
+    if (!rect) return;
+    const el = document.createElement("div");
+    el.textContent = "交给 Solace吧";
+    Object.assign(el.style, {
+      // fixed 铺满原编辑区矩形，flex 水平垂直居中
+      position: "fixed",
+      left: rect.left + "px",
+      top: rect.top + "px",
+      width: rect.width + "px",
+      height: rect.height + "px",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      textAlign: "center",
+      fontSize: "34px", // 约 text-4xl
+      fontWeight: "600",
+      color: "#C98BA4",
+      letterSpacing: "0.08em",
+      pointerEvents: "none",
+      zIndex: "61",
+      animation: "diary-release-brand 2500ms ease-in-out forwards",
+    });
+    // 注入品牌动画 keyframe（幂等：已存在就不加）
+    if (!document.getElementById("diary-release-brand-style")) {
+      const s = document.createElement("style");
+      s.id = "diary-release-brand-style";
+      s.textContent = DIARY_RELEASE_BRAND_KEYFRAME;
+      document.head.appendChild(s);
+    }
+    document.body.appendChild(el);
+    window.setTimeout(() => el.remove(), 2600);
+  }
+
+  /** 30% 确认弹窗：冻结进度期间不允许继续累积，弹窗关闭后才解锁 */
+  const [askConfirm, setAskConfirm] = useState(false);
+  const askRef = useRef(false);       // askConfirm 的 ref 镜像（手势闭包里读，避免陈旧值）
+  const askedRef = useRef(false);     // 本轮手势是否已弹过窗（防重复弹窗）
+  const confirmedRef = useRef(false); // 已点「确定」→ 保持冻结值，继续涂到满
+
+  /** 取消：弹窗关闭、进度归零、模糊恢复，回到正常编辑 */
+  function handleConfirmCancel() {
+    askRef.current = false;
+    setAskConfirm(false);
+    askedRef.current = false;
+    confirmedRef.current = false;
+    progressRef.current = 0;
+    clearVisualStyles();
+    const wrapEl = wrapRef.current;
+    if (wrapEl) wrapEl.style.userSelect = "";
+  }
+
+  /** 确定：弹窗关闭，进度保持冻结值，用户可继续涂抹累积 */
+  function handleConfirmOk() {
+    askRef.current = false;
+    setAskConfirm(false);
+    confirmedRef.current = true;
+  }
+
+  function handlePointerDown(e) {
+    // 只认鼠标左键 / 触摸与手写笔
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    // 已经在飘散或已经触发过：忽略
+    if (triggeredRef.current) return;
+
+    gestureRef.current = {
+      down: true,
+      armed: false,
+      dead: false, // 空内容时本次手势直接失效
+      path: 0,     // 累计涂抹路径（曼哈顿长度），小幅来回也算
+      startX: e.clientX,
+      startY: e.clientY,
+      lastX: e.clientX,
+      lastY: e.clientY,
+    };
+    setGestureOn(true);
+  }
+
+  useEffect(() => {
+    if (!gestureOn) return;
+    const g = gestureRef.current;
+
+    function onMove(e) {
+      if (!g.down || triggeredRef.current) return;
+      // 空内容已拦截的本次手势：直接失效，不再触发任何删除流程
+      if (g.dead) return;
+
+      const dx = e.clientX - g.lastX;
+      const dy = e.clientY - g.lastY;
+      // 曼哈顿距离：来回横涂也能累积进度，不会因为折返被抵消
+      const pathInc = Math.abs(dx) + Math.abs(dy);
+
+      g.lastX = e.clientX;
+      g.lastY = e.clientY;
+      g.path = (g.path || 0) + pathInc;
+
+      // 还没到首次激活阈值：当成普通点击 / 拖选
+      // 用累计路径判定（不用直线距离）——手机上小幅来回涂抹也能激活
+      if (!g.armed) {
+        if (g.path < RELEASE_ARM_PX) return;
+
+        // 激活前先做空内容检查：标题正文都空（含空白/残留标签）→
+        // 不弹确认、不飘散、不进回收站；进度归零、视觉恢复、轻提示、本次手势失效
+        if (isEmptyRef.current?.()) {
+          g.dead = true;
+          progressRef.current = 0;
+          clearVisualStyles();
+          try { window.getSelection()?.removeAllRanges(); } catch { /* 忽略 */ }
+          flashTip("你还没有写日记呢");
+          return;
+        }
+
+        // 激活：禁用选中，清掉已选文字
+        g.armed = true;
+        const wrapEl = wrapRef.current;
+        if (wrapEl) {
+          wrapEl.style.userSelect = "none";
+          // 手机兜底：直接在事件目标上钉死 touch-action（部分内核只认目标自身）
+          try { e.target?.style?.setProperty?.("touch-action", "none"); } catch { /* 忽略 */ }
+        }
+        try {
+          window.getSelection()?.removeAllRanges();
+        } catch {
+          /* 忽略 */
+        }
+      }
+
+      // 涂抹中：禁止页面滚动、禁止选中
+      e.preventDefault();
+
+      // 确认弹窗打开期间：冻结进度，模糊保持不动，松手也不清零
+      if (askRef.current) return;
+
+      // 累积路径长度 → 进度
+      progressRef.current = Math.min(100, progressRef.current + (pathInc / RELEASE_TOTAL_PX) * 100);
+      const p = progressRef.current;
+
+      // 首次到 30% 且还没确认过 → 冻结 + 弹确认窗（本帧视觉停在 30% 这一档）
+      if (p >= 30 && !askedRef.current && !confirmedRef.current) {
+        askedRef.current = true;
+        askRef.current = true;
+        setAskConfirm(true);
+        return;
+      }
+
+      // 每帧更新整个编辑区的视觉样式（四段分级）
+      const wrap = wrapRef.current;
+      if (wrap) {
+        const s = progressToStyle(p);
+        wrap.style.filter = s.filter;
+        wrap.style.opacity = s.opacity;
+        wrap.style.transform = s.transform;
+      }
+
+      // 到 100 → 触发飘散（本帧内，不再等松手）
+      if (p >= 100 && !triggeredRef.current) {
+        g.down = false;
+        setGestureOn(false);
+        triggerDispersal();
+      }
+    }
+
+    function onUp() {
+      g.down = false;
+      setGestureOn(false);
+
+      // 没 arm 过 → 本次手势没参与涂抹，不碰已有的进度与视觉
+      // （否则会出现"视觉被清了但进度还在"的失同步）
+      if (!g.armed) return;
+
+      // arm 过但进度没到 100 → 暂停：进度与视觉保留，恢复文本可选中
+      const wrapEl = wrapRef.current;
+      if (wrapEl) wrapEl.style.userSelect = "";
+      // 冻结弹窗开着：进度不清零、模糊不动，等用户在弹窗上做选择
+      // 到 100 时已经在 onMove 里触发了，这里什么都不用做
+    }
+
+    window.addEventListener("pointermove", onMove, { passive: false });
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+  }, [gestureOn]);
+
+  return (
+    <div>
+      {/* zone：定位上下文（飘散 clone / 品牌锚点）；wrap：涂抹作用域，touch-none 防移动端滚动 */}
+      <div ref={zoneRef} style={{ position: "relative" }}>
+        <div
+          ref={wrapRef}
+          onPointerDown={handlePointerDown}
+          className="touch-none [&_input]:touch-none [&_textarea]:touch-none"
+        >
+          {children}
+        </div>
+        {/* 30% 冻结确认弹窗（复用全局 ConfirmModal 风格） */}
+        <ConfirmModal
+          open={askConfirm}
+          message="确定要删除这段记忆吗？"
+          confirmText="确定"
+          cancelText="取消"
+          onConfirm={handleConfirmOk}
+          onClose={handleConfirmCancel}
+        />
+      </div>
+      {hint ? (
+        <p className="mt-1 mb-3 text-[11px] leading-4 text-slate-300 select-none">{hint}</p>
+      ) : null}
+
+      {/* 释放流程轻提示：fixed 全局 Toast，日记 tab / 侧边栏收起时都可见 */}
+      {tipText ? (
+        <div
+          key={tipText}
+          className="fixed left-1/2 bottom-[18%] -translate-x-1/2 z-[80] pointer-events-none
+                     px-5 py-2.5 rounded-full bg-[#FFF8F5]/95 shadow-[0_6px_20px_rgba(91,60,60,0.16)]
+                     border border-[#f0e2dc] text-[#3D3535] text-sm tracking-wide
+                     animate-[diary-empty-tip_1900ms_ease-in-out_forwards]
+                     max-w-[82vw] text-center"
+        >
+          {tipText}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export default function Chat() {
   const [user, setUser] = useState(null);
   // 认证检查中：session 接口返回前不渲染聊天界面、不跳转，避免登录后闪烁回登录页
   const [authLoading, setAuthLoading] = useState(true);
-  // 欢迎页 / 聊天页阶段切换：同一路由内的视图状态，点箭头只切 stage，不走路由，
-  // 避免"欢迎页 → /chat"的异步导航期间露出底下的登录页（闪烁根因）
-  //
-  // ⚠️ 初始值是 "pending" 而不是 "welcome"：
-  //    欢迎页**只在刚登录成功时**出现一次 —— 登录页会写一个一次性标记，
-  //    下面的 effect 读到就删，所以刷新页面、或下次再进聊天页都不会再弹。
-  const [stage, setStage] = useState("pending");
-  useEffect(() => {
-    if (stage !== "pending") return;
-    let showWelcome = false;
-    try {
-      showWelcome = window.sessionStorage.getItem("solace_show_welcome") === "1";
-      if (showWelcome) window.sessionStorage.removeItem("solace_show_welcome");
-    } catch {
-      showWelcome = false;
-    }
-    setStage(showWelcome ? "welcome" : "chat");
-  }, [stage]);
   const [conversations, setConversations] = useState([]);
   const [currentId, setCurrentId] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -877,6 +1588,51 @@ export default function Chat() {
   // 压力提醒弹窗（右上角那张卡）。null = 不显示。
   // ⚠️ 它可能来自三个地方：聊天后拉状态、日记保存后的响应、页面加载时复查。
   const [stressPopup, setStressPopup] = useState(null);
+  const [stressData, setStressData] = useState(null);
+  // 蝴蝶拍状态：open=弹窗是否打开，running=节拍是否在跑，phase=left/right/idle
+  const [butterflyPat, setButterflyPat] = useState({ open: false, running: false, phase: "idle" });
+  // 桌宠配置（形象 / 显示边长 / 情绪选项 / 回复话术池）：进站拉一次。
+  // ⚠️ 必须一次拿全 —— 绝不能在用户点情绪时再去请求：那等于让"蝴蝶回应你"卡在网络往返上，
+  //    陪伴感直接没了。拉不到就保持 null，组件会用自己的兜底形象与内置 5 条情绪。
+  const [petConfig, setPetConfig] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/pet", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (alive && data?.pet) setPetConfig(data.pet);
+      })
+      .catch(() => {
+        /* 拉不到就用兜底形象与内置情绪，不打扰用户 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // 朗读标签（TTS 情绪 / 声音事件）的展示配置：进站拉一次。
+  // ⚠️ 服务端和前端读的是**同一份配置、同一份词表** —— 服务端拿它决定要不要让 AI 产出标签，
+  //    这里拿它决定要不要把标签从气泡里剥掉。拉不到就保持 null（= 不剥）：
+  //    那时服务端同样读不到配置、也不会注入标签指令，两边自洽（等于没上这个功能）。
+  // ⚠️ 状态里只存"解析好的词表"，不存原始配置：渲染时每条消息都要用，
+  //    不能每次都把那 80 个词重新解析一遍。
+  const [ttsTagWords, setTtsTagWords] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/tts/config", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        const cfg = data?.tts;
+        // 只有「开关开着 + 接口类型是小米 MiMo」才需要剥；其它情况保持 null，渲染路径零开销
+        if (alive && cfg && isStyleTagsEnabled(cfg)) setTtsTagWords(tagWordsFrom(cfg));
+      })
+      .catch(() => {
+        /* 拉不到就不剥标签，不打扰用户 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   /**
    * 回应用户对压力提醒的操作（现在做 / 先不用 / 不再提醒）。
@@ -1000,6 +1756,22 @@ export default function Chat() {
   // 小屏检测（<1024px）：聊天视图左侧栏改为抽屉
   const [isMobile, setIsMobile] = useState(false);
 
+  // ⚠️ 移动端 body 级滚动锁：本页布局高度用 100dvh 精确贴合"动态视口"后，
+  //    页面本身不该再滚 —— 但 iOS Safari 仍允许整页橡皮筋拖动、
+  //    部分安卓 WebView 会把 body 滚出一条缝，表现都是顶栏/输入框被推出屏幕。
+  //    挂载期间锁死 body 滚动，卸载时恢复（不影响 /home 等依赖页面滚动的路由）。
+  useEffect(() => {
+    const body = document.body;
+    const prevOverflow = body.style.overflow;
+    const prevOverscroll = body.style.overscrollBehavior;
+    body.style.overflow = "hidden";
+    body.style.overscrollBehavior = "none";
+    return () => {
+      body.style.overflow = prevOverflow;
+      body.style.overscrollBehavior = prevOverscroll;
+    };
+  }, []);
+
   // 个性签名：我的页编辑，日记页展示（存 profiles.bio）
   const [bioInput, setBioInput] = useState("");
   const [savingBio, setSavingBio] = useState(false);
@@ -1076,6 +1848,18 @@ export default function Chat() {
 
   const bottomRef = useRef(null);
   const messageRefs = useRef({});
+  // 用户最近一次滚动时是否在底部附近：
+  //   · 发送/流式时用它判断"要不要跟着滚到底"—— 不能用加了新内容之后的
+  //     scrollHeight 现算（新气泡会立刻把差值顶大，导致明明在底部却被判成"不在底部"）。
+  //   · 用户主动上翻历史时它变成 false，新消息来了不打扰。
+  const wasNearBottomRef = useRef(true);
+
+  // 滚动容器 onScroll：持续记录用户是在底部还是在翻历史
+  function handleMessagesScroll() {
+    const box = messagesScrollRef.current;
+    wasNearBottomRef.current =
+      !box || box.scrollHeight - box.scrollTop - box.clientHeight < 64;
+  }
 
   // 对话消息缓存：key = 对话 id → messages 数组。
   // 第一次点开某个对话时请求后端并写入缓存；再次点回同一对话直接用缓存渲染，不再请求。
@@ -1185,6 +1969,36 @@ export default function Chat() {
     return src;
   }
 
+  // 表情包资源表：进站拉一次后端配置（后台可增删分类与素材），就地改写 STICKER_MAP。
+  // ⚠️ 拉不到就**什么都不动** —— 保留内置的四张兜底，贴纸功能照常能用。
+  // ⚠️ 必须在进站时预取：SSE 收到 {"sticker":分类} 时在流末，那一刻不能再等网络。
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/stickers", { cache: "no-store" })
+      .then((res) => res.json())
+      .then((data) => {
+        if (!alive || data?.enabled === false || !Array.isArray(data?.categories)) return;
+        const next = {};
+        for (const category of data.categories) {
+          const key = String(category?.key || "").toLowerCase();
+          const names = (Array.isArray(category?.items) ? category.items : [])
+            .map((item) => String(item?.url || "").split("/").pop())
+            .filter(Boolean);
+          if (key && names.length) next[key] = names;
+        }
+        // 后台一张素材都没配 → 保留内置兜底，否则用户端会"一张也发不出来"
+        if (!Object.keys(next).length) return;
+        for (const key of Object.keys(STICKER_MAP)) delete STICKER_MAP[key];
+        Object.assign(STICKER_MAP, next);
+      })
+      .catch(() => {
+        /* 拉不到就用内置的四张 */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
   // 把界面上的消息同步进缓存（发送/接收/编辑后同样生效）
   useEffect(() => {
     if (currentId && messagesOwnerRef.current === currentId) {
@@ -1266,11 +2080,17 @@ export default function Chat() {
     }
   }, [activeTab]);
 
+  // 流式贴底节流：SSE 每 chunk 都会改 messages 触发下面的 effect，
+  // 逐 token 写 scrollTop 又贵又抖 —— 150ms 节流（前缘立即 + 尾缘补一次），肉眼无感。
+  const lastStreamScrollRef = useRef(0);
+  const streamScrollTimerRef = useRef(null);
+
   // 定位到搜索命中的消息；没有待定位目标时保持滚动到底部。
   // 统一放到 requestAnimationFrame 里：等本帧消息 DOM 提交完再滚，
   // 避免切换对话时同步滚动与大批量渲染抢同一帧。
   // 贴底策略：切对话 → 立刻贴底；来了新消息 → 平滑贴底；
-  //           流式增量 → 只在用户已在底部附近时跟随，不打断往上翻历史。
+  //           流式增量 → 直接定位贴底（跟手不卡顿）；
+  //           无论哪种，只要用户正在往上翻历史（wasNearBottom=false）就不打扰。
   useEffect(() => {
     if (scrollTarget) {
       const el = messageRefs.current[scrollTarget];
@@ -1286,14 +2106,36 @@ export default function Chat() {
     prevConvIdRef.current = currentId;
     prevMsgLenRef.current = messages.length;
     const raf = requestAnimationFrame(() => {
-      const box = messagesScrollRef.current;
-      const nearBottom =
-        !box || box.scrollHeight - box.scrollTop - box.clientHeight < 64;
-      // 用户正在往上翻历史：不把他拽回底部
-      if (!convChanged && !nearBottom) return;
-      bottomRef.current?.scrollIntoView({
-        behavior: convChanged ? "auto" : msgAdded ? "smooth" : "auto",
-      });
+      // 切对话：无条件贴底
+      if (convChanged) {
+        bottomRef.current?.scrollIntoView({ behavior: "auto" });
+        return;
+      }
+      // 用户正在往上翻历史：新消息/流式都不把他拽回底部
+      if (!wasNearBottomRef.current) return;
+      if (msgAdded) {
+        // 新消息（用户气泡 / AI 完整回复落库）：平滑滚到底
+        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      } else {
+        // 流式增量：贴底节流 150ms —— 前缘立即滚，窗口内的 chunk 合并，
+        // 尾缘补滚一次保证流结束时最终位置准确（不会差最后一截）。
+        const now = Date.now();
+        const stick = () => {
+          lastStreamScrollRef.current = Date.now();
+          const box = messagesScrollRef.current;
+          if (box) box.scrollTop = box.scrollHeight;
+          else bottomRef.current?.scrollIntoView({ behavior: "auto" });
+        };
+        if (now - lastStreamScrollRef.current >= 150) {
+          stick();
+        } else if (!streamScrollTimerRef.current) {
+          streamScrollTimerRef.current = setTimeout(() => {
+            streamScrollTimerRef.current = null;
+            // 尾缘执行前再确认一次：节流窗口内用户往上翻了就别拽他回来
+            if (wasNearBottomRef.current) stick();
+          }, 150 - (now - lastStreamScrollRef.current));
+        }
+      }
     });
     return () => cancelAnimationFrame(raf);
   }, [messages, pendingReply, scrollTarget, streamingReply, currentId]);
@@ -1465,13 +2307,19 @@ export default function Chat() {
     await loadMemories();
   }
 
-  // 新增一条记忆：成功返回 true，弹窗据此清空输入框
+  // 新增一条记忆：成功返回 true，弹窗据此清空输入框。
+  // 与已有记忆重复时后端不会新增（只把旧记录时间刷新），这里重拉列表 + 轻提示。
   async function addMemory(content) {
     try {
       const data = await apiRequest("/api/user/memories", {
         method: "POST",
         body: { content },
       });
+      if (data.deduplicated) {
+        showHint("这条之前已经记过了，没有重复保存");
+        await loadMemories(); // 旧记录时间已刷新，重拉保证顺序正确
+        return true;
+      }
       const created = data.memory;
       setMemories((prev) => [
         created || { id: "temp-" + Date.now(), content, created_at: null },
@@ -1509,12 +2357,50 @@ export default function Chat() {
     }
   }
 
-  // 流式调用 /api/chat（SSE）：每收到一段文字就回调 onDelta(full)，最后返回完整回复
-  // 流中断时保留已收到的部分；一字未收到时回退到失败文案
-  async function askAI(history, onDelta) {
+  /** 多选批量删除入口：选中若干条后打开三按钮确认弹窗 */
+  function deleteMemoryBatch(ids) {
+    if (!Array.isArray(ids) || !ids.length) return;
+    setDeleteAsk({
+      kind: "memory-batch",
+      item: { ids, title: `${ids.length} 条记忆` },
+    });
+  }
+
+  /** 真正执行批量删除：toTrash = true 走回收站，false 彻底删除；乐观移除，失败回滚 */
+  async function performDeleteMemoryBatch(ids, toTrash) {
+    const prevList = memories;
+    const idSet = new Set(ids);
+    setMemories((prev) => prev.filter((m) => !idSet.has(m.id)));
+    try {
+      const data = await apiRequest(`/api/user/memories${toTrash ? "" : "?permanent=1"}`, {
+        method: "DELETE",
+        body: { ids },
+      });
+      const n = Number(data?.deleted) || ids.length;
+      showHint(toTrash ? `已把 ${n} 条记忆移入回收站（保留 3 天）` : `已彻底删除 ${n} 条记忆`);
+    } catch (err) {
+      setMemories(prevList);
+      showHint(err.message || "删除失败，请重试");
+    }
+  }
+
+  // 流式调用 /api/chat（SSE）：每收到一段文字就回调 onDelta(full)。
+  // 流中断时保留已收到的部分；一字未收到时回退到失败文案。
+  // 返回 { text, sticker }：sticker 是服务端情绪节流引擎在流末单独下发的贴纸分类
+  // （comfort/sleep/happy），它不混入文字流，由调用方拼进落库 content 触发贴纸渲染。
+  async function askAI(history, onDelta, options = {}) {
     let fullReply = "";
+    let sticker = null;
+    const cleanText = (s) =>
+      String(s)
+        // RISK/MEMORY 是流内控制标记；[sticker:xxx] 也绝不允许从文字流漏出
+        .replace(/\[(?:RISK|MEMORY|sticker)[^\]]*\]/gi, "")
+        .trimEnd();
     try {
       const payload = { messages: history, stream: true };
+      // 情绪计数必须按对话隔离；重新生成是重放旧消息，服务端不计数、不触发贴纸
+      if (options.conversationId) payload.conversationId = options.conversationId;
+      if (options.regenerate) payload.regenerate = true;
       // 当前对话读过日记时，把正文作为上下文带给 AI，支持追问回顾（普通聊天无此字段）
       const ctx = diaryContextRef.current[currentId];
       if (ctx) payload.diaryContext = ctx;
@@ -1524,7 +2410,10 @@ export default function Chat() {
         body: JSON.stringify(payload),
       });
       if (!res.ok || !res.body) {
-        return String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd() || "我暂时无法回应，请稍后再试。";
+        return {
+          text: cleanText(fullReply) || "我暂时无法回应，请稍后再试。",
+          sticker: null,
+        };
       }
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -1543,10 +2432,19 @@ export default function Chat() {
           if (json === "[DONE]") continue;
           try {
             const parsed = JSON.parse(json);
-            const delta = parsed?.delta;
-            if (delta) {
-              fullReply += delta;
-              onDelta?.(String(fullReply).replace(/\[RISK[^\]]*\]/gi, ""));
+            if (parsed?.delta) {
+              fullReply += parsed.delta;
+              onDelta?.(cleanText(fullReply));
+            } else if (parsed?.replace) {
+              // 服务端剥控制标记后的整段替换（与本地清洗一致，双保险）
+              fullReply = String(parsed.replace);
+              onDelta?.(cleanText(fullReply));
+            } else if (parsed?.error) {
+              fullReply = String(parsed.error);
+              onDelta?.(cleanText(fullReply));
+            } else if (parsed?.sticker && STICKER_MAP[String(parsed.sticker).toLowerCase()]) {
+              // 贴纸事件：文字流已结束，记下分类，等调用方落库时拼到正文末尾
+              sticker = String(parsed.sticker).toLowerCase();
             }
           } catch (e) {
             // 忽略单行解析错误
@@ -1556,7 +2454,7 @@ export default function Chat() {
     } catch (err) {
       // 流中断：保留已收到的部分，不清空
     }
-    return String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd() || "我暂时无法回应，请稍后再试。";
+    return { text: cleanText(fullReply) || "我暂时无法回应，请稍后再试。", sticker };
   }
 
   // 长期记忆异步提炼：流式回复结束后 fire-and-forget 调用。
@@ -1963,6 +2861,111 @@ export default function Chat() {
     }
   }
 
+  /**
+   * 「情绪释放」统一删除入口（新建 / 编辑两种模式共用同一个函数）。
+   *
+   * ⚠️ 由 DiaryReleaseZone 调用，时序：飘散 → 原地「交给 Solace」→ 锚点消失后
+   *    才调本函数（此时编辑区仍隐藏）。
+   *    返回 string = 要在全局 Toast 显示的提示文案（成功/失败都可）；
+   *    返回 true/undefined = 成功且无提示；false = 失败（zone 会给兜底提示）。
+   *
+   * 编辑模式下**全程停留在编辑界面**：成功后先弹全局 Toast，2.3s 后才返回列表，
+   * 绝不提前退出。
+   */
+  async function handleDiaryRelease(target) {
+    const isNew = target === "new";
+    const title = (isNew ? diaryTitle : diaryEditTitle).trim();
+    const content = (isNew ? diaryContent : diaryEditContent).trim();
+    const mood = isNew ? diaryMood : diaryEditMood;
+    const editingDiary = isNew ? null : diaryView;
+
+    // 清空标题/正文 + 取消心情选中（界面此刻隐藏，placeholder 不会冒出来）
+    if (isNew) {
+      setDiaryTitle("");
+      setDiaryContent("");
+      setDiaryMood("");
+    } else {
+      setDiaryEditTitle("");
+      setDiaryEditContent("");
+      setDiaryEditMood("");
+    }
+
+    const restoreFields = () => {
+      if (isNew) {
+        setDiaryTitle(title);
+        setDiaryContent(content);
+        setDiaryMood(mood);
+      } else {
+        setDiaryEditTitle(title);
+        setDiaryEditContent(content);
+        setDiaryEditMood(mood);
+      }
+    };
+
+    // ── 新建态：数据库无对应行，原稿直接进回收站（不进列表）──
+    if (isNew) {
+      if (!content && !title) return true;
+      try {
+        await apiRequest("/api/user/diaries", {
+          method: "POST",
+          body: { toTrash: true, title, content, userMood: mood || undefined },
+        });
+        return "原稿已在回收站，可以找回";
+      } catch {
+        restoreFields();
+        return "原稿没存上，我把它放回来了。";
+      }
+    }
+
+    // ── 编辑态：已存在的日记 → 留在编辑界面完成删除，提示后才回列表 ──
+    if (!editingDiary) return false;
+
+    // 若有未保存的修改且正文非空，先 PATCH 落库 —— DELETE 时快照进回收站的
+    // 是用户「刚释放的原稿」，而不是修改前的旧版本。
+    const changed =
+      (title || "无题") !== String(editingDiary.title || "").trim() ||
+      content !== String(editingDiary.content || "").trim() ||
+      (mood || "") !== (editingDiary.user_mood || "");
+    if (content && changed) {
+      try {
+        await apiRequest("/api/user/diaries", {
+          method: "PATCH",
+          body: { id: editingDiary.id, title: title || "无题", content, userMood: mood || "" },
+        });
+      } catch {
+        restoreFields();
+        return "原稿没存上，我把它放回来了。";
+      }
+    }
+
+    const released = {
+      ...editingDiary,
+      title: title || editingDiary.title || "无题",
+      content: content || editingDiary.content,
+      user_mood: mood || null,
+    };
+
+    // 乐观从列表移除，但不退出编辑界面（diaryView/diaryEdit 保留）
+    setDiaries((prev) => prev.filter((d) => d.id !== released.id));
+    try {
+      await apiRequest(
+        `/api/user/diaries?id=${encodeURIComponent(released.id)}`,
+        { method: "DELETE" }
+      );
+      // 成功：Toast 由 zone 全局显示（2.2s）；2.3s 后才返回日记列表，全程动画在编辑界面播完
+      window.setTimeout(() => {
+        setDiaryView(null);
+        setDiaryEdit(false);
+      }, 2300);
+      return "原稿已在回收站，可以找回";
+    } catch (err) {
+      // 失败：列表插回、原稿放回编辑区，用户停在原界面，无任何跳转
+      setDiaries((prev) => [released, ...prev]);
+      restoreFields();
+      return "删除失败：" + (err.message || "请稍后再试");
+    }
+  }
+
   // 新建日记：乐观插入，失败回滚
   // andSend=true：保存成功后自动把日记发给 AI 阅读
   async function handleSaveDiary(andSend = false) {
@@ -2214,8 +3217,9 @@ export default function Chat() {
     handleDeleteDiary(target);
   }
 
-  /** 真正执行日记删除：toTrash = true 走回收站，false 彻底删除 */
-  async function performDeleteDiary(diary, toTrash) {
+  /** 真正执行日记删除：toTrash = true 走回收站，false 彻底删除
+   *  opts.hintOk：自定义成功提示（情绪释放涂抹复用本入口时用，保持原有文案） */
+  async function performDeleteDiary(diary, toTrash, opts = {}) {
     const removed = { ...diary };
     const removedId = diary.id;
     setDiaryView(null);
@@ -2227,11 +3231,13 @@ export default function Chat() {
         `/api/user/diaries?id=${encodeURIComponent(removedId)}${toTrash ? "" : "&permanent=1"}`,
         { method: "DELETE" }
       );
-      showHint(toTrash ? "日记已移入回收站（保留 3 天）" : "日记已彻底删除");
+      showHint(opts.hintOk || (toTrash ? "日记已移入回收站（保留 3 天）" : "日记已彻底删除"));
+      return true;
     } catch (err) {
       setDiaries((prev) => [removed, ...prev]);
       setDiaryView(removed);
       showHint("删除失败：" + err.message);
+      return false;
     }
   }
 
@@ -2322,6 +3328,9 @@ export default function Chat() {
     ]);
 
     let fullReply = "";
+    let sticker = null;
+    const cleanDiaryReply = (s) =>
+      String(s).replace(/\[(?:RISK|MEMORY|sticker)[^\]]*\]/gi, "").trimEnd();
     let interrupted = false;
     inflightReplyConvRef.current = convId; // 标记：这条回复落库前，别用库内列表覆盖界面
     try {
@@ -2332,6 +3341,9 @@ export default function Chat() {
           messages: history,
           stream: true,
           diaryContext: diary.content,
+          // 贴纸情绪判断按对话计数；情绪文本用标题+正文（而非那句简短锚点）
+          conversationId: convId,
+          emotionText: `《${diary.title}》\n${diary.content}`,
         }),
       });
       if (!res.ok) {
@@ -2353,10 +3365,11 @@ export default function Chat() {
             if (json === "[DONE]") continue;
             try {
               const parsed = JSON.parse(json);
-              const delta = parsed?.delta;
-              if (delta) {
-                fullReply += delta;
-                updateAiStream(aiCk, String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd());
+              if (parsed?.delta) {
+                fullReply += parsed.delta;
+                updateAiStream(aiCk, cleanDiaryReply(fullReply));
+              } else if (parsed?.sticker && STICKER_MAP[String(parsed.sticker).toLowerCase()]) {
+                sticker = String(parsed.sticker).toLowerCase();
               }
             } catch (e) {
               // 忽略单行解析错误
@@ -2369,12 +3382,13 @@ export default function Chat() {
       if (fullReply) interrupted = true;
     }
     // 流结束：剩余分段全部发出
-    finishReveal(aiCk, String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd());
+    finishReveal(aiCk, cleanDiaryReply(fullReply));
     if (!fullReply) fullReply = "我在。";
 
     // 4) AI 回复落库（中断时标注），成功后气泡就地转正
-    const safeReply = String(fullReply).replace(/\[RISK[^\]]*\]/gi, "").trimEnd();
-    const replyToSave = interrupted ? `${safeReply}（回复中断）` : safeReply;
+    const safeReply = cleanDiaryReply(fullReply);
+    const replyCore = interrupted ? `${safeReply}（回复中断）` : safeReply;
+    const replyToSave = sticker ? `${replyCore}\n[sticker:${sticker}]` : replyCore;
     let savedAiMsg = null;
     if (convId) {
       try {
@@ -2411,6 +3425,12 @@ export default function Chat() {
 
   // 退出登录
   async function handleSignOut() {
+    // 清掉"本次会话已看过欢迎页"：下次登录重新走一遍欢迎页
+    try {
+      sessionStorage.removeItem("solace_welcomed");
+    } catch {
+      // 存储不可用时忽略
+    }
     await apiRequest("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
   }
@@ -2469,7 +3489,11 @@ export default function Chat() {
   }
 
   // 首次进入对话界面、且还没选过人格时弹窗提醒。
-  // 用 sessionStorage 记住"问过了"，避免每次刷新都弹。
+  // 判断两层，只有"真的从没选过"才弹：
+  //   ① 数据库 profile.ai_persona 已有值 → 直接同步，永不弹（换设备也认得）；
+  //   ② 没值但 localStorage 记过"问过了"（选过或点过先不选）→ 也不弹。
+  // ⚠️ 必须用 localStorage 而不是 sessionStorage：sessionStorage 关标签页就清空，
+  //    会让用户每次进站都重弹一次（就是"每次进入都会弹"的根因）。
   useEffect(() => {
     if (!profile) return;
     const saved = String(profile.ai_persona || "").trim();
@@ -2477,14 +3501,24 @@ export default function Chat() {
       setPersona(saved);
       return;
     }
-    if (sessionStorage.getItem("solace_persona_asked") === "1") return;
+    let asked = false;
+    try {
+      asked = localStorage.getItem("solace_persona_asked") === "1";
+    } catch {
+      // 存储不可用：当作没问过，弹一次引导也无妨
+    }
+    if (asked) return;
     setPersonaAsking(true);
   }, [profile]);
 
   /** 选择 AI 人格：保存到资料，之后 /api/chat 会自动用对应的提示词 */
   async function handlePickPersona(next) {
     setPersonaAsking(false);
-    sessionStorage.setItem("solace_persona_asked", "1");
+    try {
+      localStorage.setItem("solace_persona_asked", "1");
+    } catch {
+      // 存储不可用不影响本次保存
+    }
     if (next === persona) return;
     setPersona(next);
     try {
@@ -2492,11 +3526,21 @@ export default function Chat() {
         method: "PUT",
         body: { aiPersona: next },
       });
-      showHint(next === "male" ? 'AI 提示词已切换为「他」' : 'AI 提示词已切换为「她」');
+      showHint("人格已保存，后续可以在「我的-设置」内随时切换");
     } catch (err) {
       setPersona(profile?.ai_persona || "");
       showHint("切换失败：" + err.message);
     }
+  }
+
+  /** 蝴蝶桌宠：「就是想找人说说话」→ 切聊天 tab 并发送该消息 */
+  function handleButterflyTalk(text) {
+    setActiveTab("chat");
+    // 等 tab 切换渲染完成后再填消息并发送
+    requestAnimationFrame(() => {
+      setInput(text);
+      requestAnimationFrame(() => handleSend());
+    });
   }
 
   async function handleSend() {
@@ -2620,7 +3664,10 @@ export default function Chat() {
 
     const history = [
       { role: "system", content: SYSTEM_PROMPT },
-      ...messages.map((m) => ({ role: m.role, content: m.content })),
+      ...messages.map((m) => ({
+        role: m.role,
+        content: parseStickerMark(m.content).text,
+      })),
       { role: "user", content: text },
     ];
 
@@ -2635,9 +3682,21 @@ export default function Chat() {
     ]);
 
     inflightReplyConvRef.current = convId; // 标记：这条回复落库前，别用库内列表覆盖界面
-    const reply = await askAI(history, (full) => updateAiStream(aiCk, full));
-    // 流结束：把剩余分段全部发出
-    finishReveal(aiCk, reply);
+    const { text: replyText, sticker } = await askAI(
+      history,
+      (full) => updateAiStream(aiCk, full),
+      { conversationId: convId }
+    );
+    // 流结束：把剩余分段全部发出（只喂纯文字，贴纸标记不进 TTS / 逐句 reveal）
+    finishReveal(aiCk, replyText);
+    // 贴纸来自服务端节流引擎的独立事件：拼到正文末尾一行，渲染层 parseStickerMark
+    // 会把它拆成"文字 + 下方圆角贴纸"。先上屏再落库，不等保存返回，无插入延迟感。
+    const finalReply = sticker ? `${replyText}\n[sticker:${sticker}]` : replyText;
+    if (sticker) {
+      setMessages((prev) =>
+        prev.map((m) => (m.ck === aiCk ? { ...m, content: finalReply } : m))
+      );
+    }
     // 长期记忆提炼：流式回复结束后才发，fire-and-forget，不挡主链路
     triggerMemoryExtract(convId, text);
 
@@ -2646,7 +3705,7 @@ export default function Chat() {
     try {
       const res = await apiRequest("/api/user/messages", {
         method: "POST",
-        body: { conversationId: convId, role: "assistant", content: reply },
+        body: { conversationId: convId, role: "assistant", content: finalReply },
       });
       aiMsg = res.message;
       // AI 回复落库，活动时间同步为回复时间（已在顶部，保持时间准确）
@@ -2666,7 +3725,7 @@ export default function Chat() {
     }
     // 回复已定稿：清掉"流式输出中"标记，并把最终内容写回该对话缓存
     if (inflightReplyConvRef.current === convId) inflightReplyConvRef.current = null;
-    patchConversationCacheMessage(convId, aiCk, aiMsg || { content: reply });
+    patchConversationCacheMessage(convId, aiCk, aiMsg || { content: finalReply });
 
     setPendingReply(false);
     setSending(false);
@@ -3077,11 +4136,17 @@ export default function Chat() {
         ...messages
           .slice(0, idx)
           .filter((m) => !String(m.id).startsWith("temp-"))
-          .map((m) => ({ role: m.role, content: m.content })),
+          .map((m) => ({ role: m.role, content: parseStickerMark(m.content).text })),
       ];
 
-      // 4. 流式重写该气泡（复用 askAI，多气泡节奏）
-      reply = await askAI(history, (full) => updateAiStream(regenCk, full));
+      // 4. 流式重写该气泡（复用 askAI，多气泡节奏）。
+      //    regenerate: true → 服务端不把这次重放计入情绪、不触发贴纸
+      const { text: replyText } = await askAI(
+        history,
+        (full) => updateAiStream(regenCk, full),
+        { conversationId: currentId, regenerate: true }
+      );
+      reply = replyText;
       finishReveal(regenCk, reply);
 
       // 5. 新回复落库：沿用原 created_at，刷新后气泡位置不变
@@ -3468,32 +4533,37 @@ export default function Chat() {
     );
   }
 
-  // 阶段还没定（正要读那个一次性欢迎标记）：先给和上面一样的加载占位，
-  // 避免先闪一下欢迎页、再闪一下聊天页
-  if (stage === "pending") {
-    return (
-      <div className="h-screen flex items-center justify-center bg-[#fafaf8]">
-        <div className="flex flex-col items-center gap-3">
-          <span className="font-display text-2xl font-bold text-[#5b8aa6]">Solace</span>
-          <span className="text-sm text-slate-400">加载中…</span>
-        </div>
-      </div>
-    );
-  }
-
-  // 欢迎阶段：全屏欢迎页，点击箭头仅切换本页 stage，不触发任何路由跳转
-  if (stage === "welcome") {
-    return <WelcomeOverlay onFinish={() => setStage("chat")} />;
-  }
-
   // 每次渲染刷新气泡内回调，memo 化的气泡通过 ref 读取，始终拿到最新闭包
   bubbleHandlersRef.current = {
     onToggleTts: handleToggleTts,
     onRegenerate: handleRegenerate,
   };
 
+  // ⚠️ 布局高度用 100dvh（动态视口）：移动端浏览器的 100vh 是"地址栏收起后"的高度，
+  //    比实际可见区域高出一截 —— 整页能被拖动，顶栏和输入框轮流被推出屏幕。
+  //    内联 100dvh 覆盖 h-screen；不支持 dvh 的老浏览器会忽略内联值，回落到 100vh。
+  //    overflow-hidden 锁死外层，滚动全部交给各 tab 内部的滚动容器。
   return (
-    <div className="h-screen flex flex-col bg-[#fafaf8] text-slate-800">
+    <div
+      className="h-screen flex flex-col overflow-hidden bg-[#fafaf8] text-slate-800"
+      style={{ height: "100dvh" }}
+    >
+      {/* 全局桌宠蝴蝶：fixed + z-9999 浮于所有内容之上，可拖动，不随 tab 切换消失。
+          形象 / 尺寸 / 情绪选项 / 话术来自 GET /api/pet（后台「桌宠」页可配）；
+          petConfig?.enabled === false 时后台关了桌宠，直接不渲染。
+          ⚠️ petConfig 还是 null（正在拉）时按"启用"处理 → 先显示默认蓝蝴蝶，
+             配置到了再换成后台配的那张，不会出现"进站看不到宠物"的空窗。 */}
+      {petConfig?.enabled !== false ? (
+        <ButterflyEffect
+          onWantToTalk={handleButterflyTalk}
+          stressData={stressData}
+          butterflyPat={butterflyPat}
+          imageUrl={petConfig?.imageUrl}
+          size={petConfig?.size}
+          moods={petConfig?.moods}
+          lineRepeatHours={petConfig?.lineRepeatHours}
+        />
+      ) : null}
       {/* 顶部导航栏：左 Logo，右三个标签（固定在页面最上方） */}
       <header className="h-[60px] shrink-0 flex items-center justify-between px-4 border-b border-[#e8eae7] bg-gradient-to-r from-[#fafaf8] via-[#f2f7fa] to-[#e9f1f7]">
         {/* 左上角 Logo：点了回首页（宣传页）。
@@ -3683,7 +4753,11 @@ export default function Chat() {
             )}
           </div>
 
-        <div ref={messagesScrollRef} className="relative flex-1 overflow-y-auto px-4 py-4">
+        <div
+          ref={messagesScrollRef}
+          onScroll={handleMessagesScroll}
+          className="relative flex-1 overflow-y-auto px-4 py-4"
+        >
           {/* 新对话模式的欢迎词：居中、比正文大一号、半透明深灰，
               叠加在背景图之上且不遮挡它（pointer-events-none）。
               打字期间仍显示；第一条消息发出（messages 出现气泡）后消失 */}
@@ -3698,13 +4772,20 @@ export default function Chat() {
               </div>
             )}
 
-          {messages.map((m) => {
+          {messages.map((m, index) => {
             const isUser = m.role === "user";
             // ck 是临时气泡"转正"时保持不变的渲染 key，避免 DOM 卸载导致的闪烁
             const renderKey = m.ck || m.id;
+            // 正在流式输出的那条（最后一条 AI 气泡）：半截标签先不显示，免得屏幕上一闪而过
+            const holdTagPartial = sending && !isUser && index === messages.length - 1;
             // AI 消息按 \n 切成多段，模拟真人连发短消息（表情包标记行不算文字）
             const parsed = isUser ? null : parseStickerMark(m.content);
-            const segments = isUser ? [] : splitAiSegments(parsed.text);
+            // 朗读标签展示前剥掉（与 MessageRow 共用同一个函数与同一份词表）
+            const displayText =
+              !isUser && ttsTagWords
+                ? stripTtsTags(parsed.text, ttsTagWords, { holdPartial: holdTagPartial })
+                : parsed?.text;
+            const segments = isUser ? [] : splitAiSegments(displayText);
             const revealed = isUser ? 0 : revealedRef.current[renderKey] ?? segments.length;
             // 回复里带了表情包标记：挑一张同分类的图（同一条回复固定同一张）
             const stickerSrc = parsed?.category
@@ -3718,6 +4799,8 @@ export default function Chat() {
                 renderKey={renderKey}
                 revealed={revealed}
                 stickerSrc={stickerSrc}
+                ttsTagWords={ttsTagWords}
+                holdTagPartial={holdTagPartial}
                 highlighted={highlightId === m.id}
                 aiBubbleBg={aiBubbleBg}
                 aiAvatarUrl={profile?.ai_avatar_url}
@@ -3769,21 +4852,21 @@ export default function Chat() {
           <div ref={bottomRef} />
         </div>
 
-        {/* 首次进入时的 AI 人格选择浮层 */}
+        {/* 首次进入时的 AI 人格选择浮层：只在从未选过、且本地没问过时出现 */}
         {personaAsking && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6">
+          <div className="modal-fade fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6">
             <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
               <h3 className="text-base font-bold text-slate-800">想让我以什么身份陪你？</h3>
               <p className="text-xs text-slate-500 mt-1 leading-relaxed">
                 这是选 <span className="font-medium text-slate-600">AI 的身份</span>，
                 <span className="font-medium text-slate-600">不是选你自己的性别</span>。
-                选一个你觉得舒服的就好，之后随时能在「我的 → 设置 → AI 提示词性别」或输入框旁切换。
+                选一个你觉得舒服的就好，之后随时能在「我的 → 设置 → AI 提示词性别」里换。
               </p>
               <div className="flex gap-3 mt-4">
                 <button
                   type="button"
                   onClick={() => handlePickPersona("female")}
-                  className="flex-1 p-3 rounded-xl border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 hover:bg-[#e8eff2] transition-colors"
+                  className="flex-1 p-3 rounded-xl border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 hover:bg-[#e8eff2] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
                 >
                   <span className="block text-lg">她</span>
                   <span className="block text-xs text-slate-500 mt-1">温柔的女性朋友</span>
@@ -3791,7 +4874,7 @@ export default function Chat() {
                 <button
                   type="button"
                   onClick={() => handlePickPersona("male")}
-                  className="flex-1 p-3 rounded-xl border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 hover:bg-[#e8eff2] transition-colors"
+                  className="flex-1 p-3 rounded-xl border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 hover:bg-[#e8eff2] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
                 >
                   <span className="block text-lg">他</span>
                   <span className="block text-xs text-slate-500 mt-1">温和的男性朋友</span>
@@ -3801,7 +4884,11 @@ export default function Chat() {
                 type="button"
                 onClick={() => {
                   setPersonaAsking(false);
-                  sessionStorage.setItem("solace_persona_asked", "1");
+                  try {
+                    localStorage.setItem("solace_persona_asked", "1");
+                  } catch {
+                    // 存储不可用不影响
+                  }
                 }}
                 className="w-full mt-3 text-xs text-slate-400 hover:text-slate-600 transition-colors"
               >
@@ -3811,7 +4898,9 @@ export default function Chat() {
           </div>
         )}
 
-        <div className="relative px-3 pb-2">
+        {/* 桌宠蝴蝶的默认落点贴着这个容器的上沿（见 components/ButterflyEffect.jsx）：
+            data-chat-input-bar 是它唯一的定位锚点 —— 蝴蝶停在「发送」键正上方，不挡正文 */}
+        <div data-chat-input-bar className="relative px-3 pb-2">
           <div className="flex gap-2">
             <input
               type="text"
@@ -3825,19 +4914,6 @@ export default function Chat() {
               placeholder="说点什么，说什么都可以"
               className={inputClass}
             />
-            {/* 人格快捷切换：点一下即切换并保存（发送键左侧） */}
-            <button
-              type="button"
-              onClick={() => handlePickPersona(persona === "female" ? "male" : "female")}
-              title={
-                persona === "male"
-                  ? "当前：男性人格，点击切换为女性"
-                  : "当前：女性人格，点击切换为男性"
-              }
-              className={`${btnBase} px-3 shrink-0 text-sm`}
-            >
-              {persona === "male" ? "他" : "她"}
-            </button>
             <button
               onClick={handleSend}
               disabled={sending}
@@ -3859,7 +4935,7 @@ export default function Chat() {
         {activeTab === "firstaid" && (
           <div className="tab-fade h-full overflow-y-auto px-4 py-8 flex justify-center">
             <div className="w-full max-w-[700px]">
-              <HealingCottage />
+              <HealingCottage userId={user?.id || user?.userId} onButterflyPatChange={setButterflyPat} />
             </div>
           </div>
         )}
@@ -4237,6 +5313,10 @@ export default function Chat() {
                       <h2 className="text-lg font-bold text-slate-800 mb-3">
                         写日记
                       </h2>
+                      <DiaryReleaseZone
+                        onRelease={() => handleDiaryRelease("new")}
+                        isEmpty={() => releaseIsBlank(diaryTitle) && releaseIsBlank(diaryContent)}
+                      >
                       <input
                         type="text"
                         value={diaryTitle}
@@ -4248,8 +5328,8 @@ export default function Chat() {
                         value={diaryContent}
                         onChange={(e) => setDiaryContent(e.target.value)}
                         placeholder="今天发生了什么？慢慢写，我在。"
+                        className={`${inputClass} resize-none`}
                         rows={10}
-                        className={`${inputClass} mb-3 resize-none`}
                       />
 
                       {/* 情绪标签（可选）：一行 8 个，从「有点沉」到「轻快」。
@@ -4276,6 +5356,7 @@ export default function Chat() {
                           {savingDiary ? "保存中..." : "保存并发送给 AI"}
                         </button>
                       </div>
+                      </DiaryReleaseZone>
                     </div>
                   ) : diaryView && diaryEdit ? (
                     /* 编辑态：标题和正文可编辑 */
@@ -4283,6 +5364,10 @@ export default function Chat() {
                       <h2 className="text-lg font-bold text-slate-800 mb-3">
                         编辑日记
                       </h2>
+                      <DiaryReleaseZone
+                        onRelease={() => handleDiaryRelease("edit")}
+                        isEmpty={() => releaseIsBlank(diaryEditTitle) && releaseIsBlank(diaryEditContent)}
+                      >
                       <input
                         type="text"
                         value={diaryEditTitle}
@@ -4293,8 +5378,9 @@ export default function Chat() {
                       <textarea
                         value={diaryEditContent}
                         onChange={(e) => setDiaryEditContent(e.target.value)}
+                        placeholder="今天发生了什么？慢慢写，我在。"
+                        className={`${inputClass} resize-none`}
                         rows={10}
-                        className={`${inputClass} mb-3 resize-none`}
                       />
                       <div className="mb-3">
                         <p className="text-xs text-slate-400 mb-1.5">心情标签</p>
@@ -4315,6 +5401,7 @@ export default function Chat() {
                           取消
                         </button>
                       </div>
+                      </DiaryReleaseZone>
                     </div>
                   ) : diaryView ? (
                     /* 详情态：完整标题、日期、正文 */
@@ -4406,7 +5493,7 @@ export default function Chat() {
           target={
             deleteAsk?.kind === "diary"
               ? "日记"
-              : deleteAsk?.kind === "memory"
+              : deleteAsk?.kind === "memory" || deleteAsk?.kind === "memory-batch"
               ? "记忆"
               : "内容"
           }
@@ -4419,6 +5506,8 @@ export default function Chat() {
             try {
               if (ask?.kind === "diary") await performDeleteDiary(ask.item, true);
               if (ask?.kind === "memory") await performDeleteMemory(ask.item, true);
+              if (ask?.kind === "memory-batch")
+                await performDeleteMemoryBatch(ask.item.ids, true);
             } finally {
               setDeleteBusy(false);
               setDeleteAsk(null);
@@ -4430,6 +5519,8 @@ export default function Chat() {
             try {
               if (ask?.kind === "diary") await performDeleteDiary(ask.item, false);
               if (ask?.kind === "memory") await performDeleteMemory(ask.item, false);
+              if (ask?.kind === "memory-batch")
+                await performDeleteMemoryBatch(ask.item.ids, false);
             } finally {
               setDeleteBusy(false);
               setDeleteAsk(null);
@@ -4765,6 +5856,7 @@ export default function Chat() {
         onClose={() => setMemoriesOpen(false)}
         onAdd={addMemory}
         onDelete={deleteMemory}
+        onDeleteMany={deleteMemoryBatch}
       />
 
       {/* ---- 压力评估：右上角的读数 + 提醒卡片 ----
@@ -4773,7 +5865,7 @@ export default function Chat() {
              到那边又被问一遍。
           ⚠️ RelaxPopup 只负责"要不要做"；真正做放松还是走「治愈小屋」那套
              组件（呼吸 / 蝴蝶拍），不重复实现。 */}
-      <StressMeter api={apiRequest} onPendingPopup={setStressPopup} />
+      <StressMeter api={apiRequest} onPendingPopup={setStressPopup} onData={setStressData} />
       <RelaxPopup
         popup={stressPopup}
         onRespond={respondStressPopup}

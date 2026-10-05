@@ -7,8 +7,10 @@
 | 文档 | 什么时候看 | 内容 |
 |---|---|---|
 | [API.md](./API.md) | 对接接口、排查接口报错 | 全部端点的说明、认证方式、状态码、限流一览、数据库表结构 |
-| [INCIDENTS.md](./INCIDENTS.md) | 遇到"以前出过的问题"、复盘 | **10 条**已发生的故障记录（现象 / 根因 / 修复 / 预防）—— 含 4 条部署期事故 + 6 条功能期事故 |
+| [INCIDENTS.md](./INCIDENTS.md) | 遇到"以前出过的问题"、复盘 | **16 条**已发生的故障记录（现象 / 根因 / 修复 / 预防）—— 含部署期 / 运维 / 功能期三类 |
 | [MUSIC.md](./MUSIC.md) | 改音乐功能、配网易云 | 三种音源、网易云官方播放器参数、能力边界、自动降级、备份迁移 |
+| [STICKER.md](./STICKER.md) | 改表情包触发逻辑 / 换贴纸素材 | 情绪关键词+AI 兜底、概率递增（0/40/100%，深夜放宽 60/100%）、归零与冷却、5 轮全局间隔、内存计数、SSE 插入方式、**分类与素材的后台配置步骤**（词表 / 优先级 / 素材现在都在后台改，代码里只留出厂兜底） |
+| [TTS.md](./TTS.md) | 改朗读标签 / 换语气词表 / 排查"屏幕上出现 `[开心]`"或"朗读念出怪音" | **语音朗读标签（只有小米 MiMo 生效）**：三段式链路（生成 → 存库保留 → 展示剥离）、**朗读侧三层净化**（动作描写与颜文字会被念出来，最严重时整句变乱码）、白名单闭合匹配的剥离边界、官方两张词表与后台开关、`holdPartial` 流式防闪、五个坑、验收清单与 **TTS→ASR 自测法** |
 | [CONTENT-REVIEW.md](./CONTENT-REVIEW.md) | 配数据审核 / 排查审核不生效 | 用户资料异步审核（小米 MiMo 批量推理）、**日记情绪打标**、**AI 生成日记**、违规处置、默认值配置、定时任务、常见问题 |
 | [PORTRAIT.md](./PORTRAIT.md) | 改心理画像 / 调聊天风格 | **用户心理画像方案**：四个维度的判定规则、标签→风格指令映射、触发时机、边界情况。⚠️ 全程本地规则，不调任何 AI |
 | [assessment-scale-example.json](./assessment-scale-example.json) | 要上传新量表时 | 题库 JSON 的**格式示例**（字段结构、反向计分、阈值写法） |
@@ -18,6 +20,7 @@
 | [STRESS-AGENT-PROMPT.md](./STRESS-AGENT-PROMPT.md) | 追溯原始需求 | 当初交给 Agent 的交付提示词（**原始版，未修订**） |
 | [PERFORMANCE.md](./PERFORMANCE.md) | 觉得卡 / 要调优 / 答辩要讲性能 | 全站体检实测数据、慢查询根因与修法、PM2 内存坑、安全建议、明确不用做的事 |
 | [OPTIMIZATION-TODO.md](./OPTIMIZATION-TODO.md) | 想继续优化但不知道做什么 | 还没做的 18 项优化，按 P0-P3 分级，每项含具体命令、预期收益、风险 |
+| [PET.md](./PET.md) | 改聊天页那只蓝蝴蝶桌宠 | **桌宠技术文档（已上线的那只）**：交互地图 / 状态持久化 / 三层动画结构 / 与压力评估和蝴蝶拍怎么耦合 / 拖动实现与 `use-draggable.js` 的差异 / **形象·尺寸·情绪·话术的后台配置** / 改动入口 / 验收清单 |
 | [PET-ART-SPEC.md](./PET-ART-SPEC.md) | 画师 / 组员要画桌宠 | 桌宠美术交付规格（画布 / 图层拆分 / 尺寸 / 命名 / 动画参数 / 配色 / 验收）—— **可直接发给画师** |
 | [PET-DESIGN.md](./PET-DESIGN.md) | 要做虚拟宠物时 | 桌宠完整方案（定位 / 红线 / 功能清单 / 后端 / 前端 / **算力评估** / **性能优化** / **美术需求**）—— 已设计未实现 |
 | [DEV-HISTORY.md](./DEV-HISTORY.md) | 写技术报告 / 开发历程随笔 | **11 个阶段**（技术选型 → 后端搭建 → 上线踩坑 → 工程加固 → 前后端融合 → 协作流程 → 背景音乐 → 内容审核 → 日记体系 → 性能 → 压力评估），末尾附 **12 个可展开的文章角度** |
@@ -39,11 +42,14 @@
 | 压测、看性能数据 | [OPERATIONS.md](./OPERATIONS.md) → 六；脚本在 `scripts/bench.sh` |
 | 了解整体功能、架构、安全设计 | [../README.md](../README.md) |
 | 配背景音乐 / 加网易云歌曲 | [MUSIC.md](./MUSIC.md) |
+| 改表情包触发概率 / 换贴纸图 / 加贴纸分类 | [STICKER.md](./STICKER.md)（分类与素材去后台「表情包」页；概率表在代码里） |
+| 改朗读语气标签 / 语气词表 / 用户屏幕上冒出了 `[开心]` | [TTS.md](./TTS.md)；只改词表 → 后台「语音 TTS」页 |
 | 配数据审核 / 日记打标 / AI 生成日记 | [CONTENT-REVIEW.md](./CONTENT-REVIEW.md) |
 | 改压力评估算法 / 讲它的设计 | [STRESS-DESIGN.md](./STRESS-DESIGN.md) |
 | 查压力评估的阈值、档位、触发参数 | [STRESS-SPEC.md](./STRESS-SPEC.md) |
 | 觉得网站卡 / 要讲性能优化 | [PERFORMANCE.md](./PERFORMANCE.md) |
 | 想继续优化，不知道做什么 | [OPTIMIZATION-TODO.md](./OPTIMIZATION-TODO.md) |
+| 改已上线的蓝蝴蝶桌宠（拖动 / 情绪气泡 / 蝴蝶拍联动） | [PET.md](./PET.md)；只想改形象 / 尺寸 / 情绪 / 话术 → 直接去后台「桌宠」页 |
 | 要给画师提桌宠需求 | [PET-ART-SPEC.md](./PET-ART-SPEC.md) |
 | 要做虚拟宠物（桌宠） | [PET-DESIGN.md](./PET-DESIGN.md) → 含算力评估、性能优化、美术需求 |
 
@@ -94,6 +100,7 @@
 | 动了什么功能 | 必须同步 |
 |---|---|
 | **背景音乐 / 网易云 / 音源 / 播放器 UI** | `MUSIC.md` |
+| **AI 表情包贴纸 / 情绪触发 / 贴纸素材** | `STICKER.md` |
 | **压力评估 / 放松提醒 / 危机干预** | `STRESS-DESIGN.md` + `STRESS-SPEC.md` |
 | **内容审核 / 日记打标 / AI 生成日记** | `CONTENT-REVIEW.md` |
 | **性能 / 索引 / PM2 / 缓存 / 慢查询** | `PERFORMANCE.md` |
@@ -112,6 +119,6 @@
 |---|---|
 | **应用端口** | 统一 **3000**（`ecosystem.config.js` 里写死），Nginx 反代必须指向它 |
 | **只保留一个实例** | 要么用 pm2，要么用宝塔 Node 项目，**不要两个都跑** —— 否则会出现"改了代码一半生效"或 502 |
-| **构建后必须重启** | `npm run build` 只是生成 `.next`，运行中的进程还加载着旧代码 |
-| **内存小就先停应用再构建** | `pm2 stop solace` → `npm run build` → `pm2 start solace` |
+| **构建后必须重启** | `npm run build` 只是生成 `.next`，运行中的进程还加载着旧代码。⚠️ 构建成功判据是**退出码 0**，**不是** `✓ Compiled successfully`（那一行在 lint 之前就打印，见 INC-016） |
+| **部署顺序：先构建，最后才切换服务** | `npm run build`（这期间线上仍跑旧版）→ 成功后再 `pm2 delete solace && pm2 start ecosystem.config.js`。只有内存 <2G 才需要先 `pm2 stop`，且把 `stop → build → start` 整段交给脚本 / `nohup`，**别手敲 `&&` 链**（INC-014） |
 | **配置不进版本库** | `.env.local`、`config/db.json`、`config/installed.lock` 都不要上传/外发 |

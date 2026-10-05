@@ -201,7 +201,9 @@
 ```bash
 cd /tmp && rm -rf sp && mkdir sp && unzip -o /tmp/solace-deploy.zip -d sp
 \cp -rf /tmp/sp/. /www/wwwroot/solace/
-cd /www/wwwroot/solace && pm2 stop solace && rm -rf .next && npm run build && pm2 delete solace && pm2 start ecosystem.config.js
+
+# 先构建，成功了再切换（⚠️ 停服务的步骤永远排最后，别用 stop 开头的 && 链，见 INC-014）
+cd /www/wwwroot/solace && npm run build && pm2 delete solace && pm2 start ecosystem.config.js
 ```
 
 ### 2. 在后台配置审核 AI

@@ -1,11 +1,60 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+// 侧面欢迎蝴蝶的显示尺寸（图片原始 360x240，宽高比 1.5）
+const WELCOME_BF_W = 72;
+const WELCOME_BF_H = 48;
 
 // 登录成功后的全屏欢迎过渡页：
 // 米白/淡蓝渐变背景 + 漂浮气泡 + 逐行淡入文字，点击箭头按钮淡出后由父组件跳转 /chat
 export default function WelcomeOverlay({ onFinish }) {
   const [leaving, setLeaving] = useState(false);
+
+  // —— 侧面欢迎蝴蝶（仅存在于本欢迎页，与聊天页桌宠蝴蝶完全独立）——
+  // bf = null：未出现；否则 { x, y, phase: "fly"|"hover" }
+  // 飞到标题上方后永久悬停；点击箭头时由 leaving 触发淡出，组件卸载即移除
+  const titleRef = useRef(null);
+  const [bf, setBf] = useState(null);
+  const bfTimers = useRef([]);
+
+  useEffect(() => {
+    // 等标题布局完成后测量目标坐标（相对标题，不写死像素）
+    const raf = requestAnimationFrame(() => {
+      const W = WELCOME_BF_W, H = WELCOME_BF_H;
+      let cx = window.innerWidth / 2;
+      let titleTop = window.innerHeight / 2;
+      const title = titleRef.current;
+      if (title) {
+        const r = title.getBoundingClientRect();
+        cx = r.left + r.width / 2;          // 标题中心 X
+        titleTop = r.top;                    // 标题顶部 Y
+      }
+      // 蝴蝶中心落在「标题中心 X、标题顶部再往上 60px」
+      const tx = cx - W / 2;
+      const ty = titleTop - 60 - H / 2;
+      // 起点：左屏外 + 屏幕下方外（斜向上往右飞，图片头朝右，无需翻转）
+      const sx = -W - 40;
+      const sy = window.innerHeight + 60;
+
+      // 先渲染在屏外起点，确保浏览器 paint 一帧后再切到目标 → 外层 transition 平滑飞 3s
+      setBf({ x: sx, y: sy, phase: "fly" });
+      const t0 = setTimeout(() => {
+        setBf({ x: tx, y: ty, phase: "fly" });
+      }, 30);
+      bfTimers.current.push(t0);
+
+      // 飞到后进入悬停态并永久停留，直到用户点击箭头（leaving）才淡出
+      bfTimers.current.push(
+        setTimeout(() => setBf((b) => (b ? { ...b, phase: "hover" } : b)), 3030)
+      );
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      bfTimers.current.forEach(clearTimeout);
+      bfTimers.current = [];
+    };
+  }, []);
 
   // 漂浮气泡配置：淡蓝 / 米色 / 浅粉，大小与周期不一，延迟错开。
   // 色值比背景明显深一档，配合下面的透明度，保证在浅色渐变上依然看得见。
@@ -57,6 +106,25 @@ export default function WelcomeOverlay({ onFinish }) {
           from { opacity: 0; transform: translateY(14px); }
           to { opacity: 1; transform: translateY(0); }
         }
+        /* 侧面蝴蝶飞行弧线：y 波动 + 旋转摇摆（中层，不影响外层位移） */
+        @keyframes welcome-bf-arc {
+          0%   { transform: translateY(0) rotate(0deg); }
+          30%  { transform: translateY(8px) rotate(-10deg); }
+          55%  { transform: translateY(-5px) rotate(5deg); }
+          80%  { transform: translateY(3px) rotate(-3deg); }
+          100% { transform: translateY(0) rotate(0deg); }
+        }
+        /* 悬停时轻轻上下浮 */
+        @keyframes welcome-bf-hover {
+          0%, 100% { transform: translateY(0); }
+          50%      { transform: translateY(-7px); }
+        }
+        /* 侧视扇翅：scaleY 上下开合（不用 scaleX） */
+        @keyframes welcome-side-flap {
+          0%   { transform: scaleY(1)    rotate(0deg); }
+          50%  { transform: scaleY(0.75) rotate(-6deg); }
+          100% { transform: scaleY(1)    rotate(0deg); }
+        }
       `}</style>
 
       {/* 漂浮气泡：半透明，边缘柔化，颜色比之前明显一档（浅色渐变上也能看清） */}
@@ -77,9 +145,68 @@ export default function WelcomeOverlay({ onFinish }) {
         />
       ))}
 
-      {/* 中央文字：逐行淡入（衬线 display 字体，安静而有文气） */}
+      {/* 侧面欢迎蝴蝶：WelcomeOverlay 内部临时元素，3.8s 后彻底移除
+          外层管位置（transition 平滑飞入）/ 中层管弧线摇摆 / 内层管 scaleY 扇翅 */}
+      {bf && (
+        <div
+          aria-hidden
+          style={{
+            position: "fixed",
+            left: 0,
+            top: 0,
+            zIndex: 20,
+            width: WELCOME_BF_W,
+            height: WELCOME_BF_H,
+            pointerEvents: "none",
+            transform: `translate(${bf.x}px, ${bf.y}px)`,
+            // 飞入 3s；淡出 0.6s，只在用户点击箭头（leaving）时触发
+            transition:
+              "transform 3s cubic-bezier(0.42, 0, 0.58, 1), opacity 0.6s ease-out",
+            opacity: leaving ? 0 : 1,
+            willChange: "transform, opacity",
+          }}
+        >
+          <div
+            style={{
+              width: "100%",
+              height: "100%",
+              animation:
+                bf.phase === "fly"
+                  ? "welcome-bf-arc 3s ease-in-out forwards"
+                  : "welcome-bf-hover 2.6s ease-in-out infinite",
+              willChange: "transform",
+            }}
+          >
+            <div
+              style={{
+                width: "100%",
+                height: "100%",
+                transformOrigin: "50% 60%",
+                // 飞行时扇翅轻快（0.55s），悬停后放慢（1.2s），全程不停
+                animation:
+                  bf.phase === "fly"
+                    ? "welcome-side-flap 0.55s ease-in-out infinite"
+                    : "welcome-side-flap 1.2s ease-in-out infinite",
+                willChange: "transform",
+              }}
+            >
+              {/* 头朝右：飞行方向也是向右，保持原样；若改向左飞需加 scaleX(-1) */}
+              <img
+                src="/stickers/blue_butterfly_side.png"
+                alt=""
+                width={WELCOME_BF_W}
+                height={WELCOME_BF_H}
+                draggable={false}
+                style={{ width: "100%", height: "100%", display: "block" }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="relative z-10 text-center px-6">
         <h1
+          ref={titleRef}
           className="font-display text-3xl md:text-4xl font-bold text-[#525c68] mb-5"
           style={{
             animation: "welcome-fade-line 1s ease-out both",

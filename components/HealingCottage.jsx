@@ -105,25 +105,41 @@ function gadFeedback(score) {
   return "建议寻求专业支持，拨打 400-161-9995。";
 }
 
-/* ================= 本地存储 ================= */
+/* ================= 日期格式化 ================= */
 
-function loadHistory() {
-  const read = (key) => {
+// 后端 created_at（MySQL datetime 字符串或 ISO）→ "2026/10/2" 风格短日期
+function fmtDateCN(raw) {
+  if (!raw) return "";
+  const d = new Date(typeof raw === "string" ? raw.replace(" ", "T") : raw);
+  if (Number.isNaN(d.getTime())) return String(raw).slice(0, 10);
+  return d.toLocaleDateString("zh-CN");
+}
+
+/* ================= 本地缓存清理（旧版本把测评结果存过 localStorage） ================= */
+
+// 卡片状态已全面以后端 assessment_results 为准；旧的本地键只做一次性清残留
+function clearLocalAssessmentCache(userId) {
+  const bases = ["solace_personality_result", "solace_phq9_result", "solace_gad7_result"];
+  for (const base of bases) {
     try {
-      const v = localStorage.getItem(key);
-      return v ? JSON.parse(v) : null;
-    } catch (e) {
-      return null;
+      localStorage.removeItem(base);
+      if (userId) localStorage.removeItem(`${base}_${userId}`);
+    } catch {
+      /* 隐私模式等场景忽略 */
     }
-  };
-  return {
-    personality: read("solace_personality_result"),
-    phq9: read("solace_phq9_result"),
-    gad7: read("solace_gad7_result"),
-  };
+  }
 }
 
 const todayCN = () => new Date().toLocaleDateString("zh-CN");
+
+/** 随时间段变化的问候 —— 让首页第一眼像"有人在等你"，而不是一个标题 */
+function greetingOfDay() {
+  const h = new Date().getHours();
+  if (h < 6) return "夜深了，别硬撑";
+  if (h < 12) return "早上好，慢慢来";
+  if (h < 18) return "下午好，留点时间给自己";
+  return "晚上好，今天辛苦了";
+}
 
 /* ================= 每日心理学名言 ================= */
 
@@ -188,7 +204,7 @@ function pickTodayQuote() {
 
 /* ================= 组件 ================= */
 
-export default function HealingCottage() {
+export default function HealingCottage({ userId, onButterflyPatChange }) {
   // mode: null=小屋首页 | "personality" | "mood"
   const [mode, setMode] = useState(null);
 
@@ -223,10 +239,58 @@ export default function HealingCottage() {
   });
   const historyModalRef = useRef(null);
 
-  // 进入页面时读取历史结果
+  // 卡片状态**只从后端拉**（assessment_results 真实记录），不读本地缓存。
+  // 挂载、提交测评后、删除历史后都调它，保证「已测评 / 未测评」与数据库条数实时一致。
+  async function refreshCardStatus() {
+    if (!userId) {
+      setHistory({ personality: null, phq9: null, gad7: null });
+      return;
+    }
+    try {
+      const [pRes, eRes] = await Promise.all([
+        fetch("/api/user/assessments?type=personality", { cache: "no-store" })
+          .then((r) => r.json())
+          .catch(() => null),
+        fetch("/api/user/assessments?type=emotion", { cache: "no-store" })
+          .then((r) => r.json())
+          .catch(() => null),
+      ]);
+
+      // 性格倾向：最新一条记录的 type → 名称从本地 TYPE_INFO 反查
+      const pLatest = pRes?.ok && Array.isArray(pRes.records) ? pRes.records[0] : null;
+      const personality = pLatest?.data?.type
+        ? {
+            date: fmtDateCN(pLatest.created_at),
+            type: pLatest.data.type,
+            name: TYPE_INFO[pLatest.data.type]?.[0] || "探索者",
+          }
+        : null;
+
+      // 情绪自评：一次提交同时含 phq9 / gad7，取最新一条
+      const eLatest = eRes?.ok && Array.isArray(eRes.records) ? eRes.records[0] : null;
+      const eData = eLatest?.data || {};
+      const phq9 =
+        typeof eData.phq9 === "number"
+          ? { date: fmtDateCN(eLatest.created_at), score: eData.phq9 }
+          : null;
+      const gad7 =
+        typeof eData.gad7 === "number"
+          ? { date: fmtDateCN(eLatest.created_at), score: eData.gad7 }
+          : null;
+
+      setHistory({ personality, phq9, gad7 });
+    } catch {
+      // 网络失败：保持当前展示，不闪空（下次挂载/操作再对齐）
+    }
+    // 顺手清掉旧版本写在本地的测评缓存（删历史后也不会被本地旧值"复活"）
+    clearLocalAssessmentCache(userId);
+  }
+
+  // 进入页面：以后端记录为准初始化卡片状态（绝不优先读本地缓存）
   useEffect(() => {
-    setHistory(loadHistory());
-  }, []);
+    refreshCardStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   // 每日心理学名言：首次加载选一条，跨天自动刷新
   const [todayQuote, setTodayQuote] = useState(null);
@@ -246,14 +310,16 @@ export default function HealingCottage() {
 
   /* ---------- 测评历史（后端持久化） ---------- */
 
-  // 提交一条测评结果到后端（静默失败，不阻断用户流程）
+  // 提交一条测评结果到后端（静默失败，不阻断用户流程）；
+  // 成功后立刻重拉卡片状态，保证乐观展示与数据库一致
   async function submitAssessment(type, data) {
     try {
-      await fetch("/api/user/assessments", {
+      const res = await fetch("/api/user/assessments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, data }),
       });
+      if (res.ok) refreshCardStatus();
     } catch {
       // 静默失败：网络异常或未登录时不上报，不影响测评体验
     }
@@ -333,6 +399,8 @@ export default function HealingCottage() {
         selectMode: false,
         deleting: false,
       }));
+      // 关键：删除后重拉卡片状态——删光后卡片立刻回到「还没有测过」
+      refreshCardStatus();
     } catch {
       setHistoryModal((m) => ({
         ...m,
@@ -370,11 +438,9 @@ export default function HealingCottage() {
       const [name, desc] =
         TYPE_INFO[type] || ["探索者", "每个人都有独特的性格组合，这是一次认识自己的小小旅行。"];
       const result = { date: todayCN(), type, name, desc };
-      try {
-        localStorage.setItem("solace_personality_result", JSON.stringify(result));
-      } catch (e) {}
       setPResult(result);
-      setHistory((h) => ({ ...h, personality: result }));
+      // 乐观更新卡片，随后以后端记录为准对齐（不再写 localStorage）
+      setHistory((h) => ({ ...h, personality: { date: result.date, type, name } }));
       // 提交到后端：存 type + 四个维度的 A 选项占比（I/N/T/J 方向的百分比）
       submitAssessment("personality", {
         type,
@@ -412,11 +478,8 @@ export default function HealingCottage() {
       const date = todayCN();
       const pRes = { date, score: phq };
       const gRes = { date, score: gad };
-      try {
-        localStorage.setItem("solace_phq9_result", JSON.stringify(pRes));
-        localStorage.setItem("solace_gad7_result", JSON.stringify(gRes));
-      } catch (e) {}
       setMResult({ phq: pRes, gad: gRes });
+      // 乐观更新卡片；submitAssessment 成功后以后端记录为准对齐（不再写 localStorage）
       setHistory((h) => ({ ...h, phq9: pRes, gad7: gRes }));
       // 提交到后端：存 PHQ-9 和 GAD-7 两个分数
       // ⚠️ 额外带上 **PHQ-9 第 9 题**（自伤念头）的单题分 ——
@@ -666,19 +729,21 @@ export default function HealingCottage() {
 
   return (
     <div className="space-y-4">
-      {/* 标题区 */}
+      {/* 标题区：问候在上（小字）、标题在下 —— 克制，不喧哗 */}
       <div className="text-center py-2">
-        <h1 className="text-2xl font-bold text-slate-800">
-          🏠 治愈小屋
-        </h1>
-        <p className="text-sm text-slate-400 mt-1">慢下来，陪自己一会儿。</p>
+        <p className="text-xs text-[#5b8aa6] tracking-widest">{greetingOfDay()}</p>
+        <h1 className="text-xl font-bold text-slate-800 mt-1">治愈小屋</h1>
+        <p className="text-xs text-slate-400 mt-1">慢下来，陪自己一会儿。</p>
       </div>
 
       {/* 原有功能：呼吸放松 / 蝴蝶拍 / 安全提示 */}
-      <FirstAid />
+      <FirstAid onButterflyPatChange={onButterflyPatChange} />
 
       {/* 测评区 */}
-      <p className="text-sm font-bold text-slate-700 px-1 pt-1">小测评</p>
+      <div className="px-1 pt-1">
+        <p className="text-sm font-bold text-slate-700">认识自己</p>
+        <p className="text-xs text-slate-400 mt-0.5">三个小测评，帮你看清最近的状态</p>
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {/* 性格倾向探索 */}
         <div className={cardBase + " p-4 flex flex-col"}>
@@ -691,15 +756,17 @@ export default function HealingCottage() {
           <div className="flex-1 rounded-xl bg-[#fafcfb] border border-[#eef1f2] px-3 py-2.5 mb-3">
             {history.personality ? (
               <>
+                <div className="mb-1 flex items-center gap-2">
+                  <span className="rounded-full bg-[#eef4f6] px-2 py-0.5 text-[11px] text-[#5b8aa6]">
+                    已测评
+                  </span>
+                  <span className="text-xs text-slate-400">{history.personality.date}</span>
+                </div>
                 <p className="text-sm text-slate-700">
-                  最近一次：
                   <span className="font-bold text-[#5b8aa6]">
                     {history.personality.type}
                   </span>{" "}
                   {history.personality.name}
-                </p>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {history.personality.date}
                 </p>
               </>
             ) : (
@@ -731,6 +798,11 @@ export default function HealingCottage() {
             PHQ-9 + GAD-7 共 16 题，觉察近两周的情绪
           </p>
           <div className="flex-1 rounded-xl bg-[#fafcfb] border border-[#eef1f2] px-3 py-2.5 mb-3 space-y-1">
+            {history.phq9 || history.gad7 ? (
+              <span className="inline-block rounded-full bg-[#eef4f6] px-2 py-0.5 text-[11px] text-[#5b8aa6]">
+                已测评
+              </span>
+            ) : null}
             {history.phq9 ? (
               <p className="text-xs text-slate-600">
                 PHQ-9：

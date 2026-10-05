@@ -128,15 +128,16 @@ export default function MusicPlayer() {
   const current = tracks[safeIndex] || null;
 
   // ---------- 播放控制 ----------
+  // 返回 true = 播放成功；false = 失败（自动播放解锁要根据它决定要不要重试）
   const play = useCallback(async () => {
     const audio = audioRef.current;
-    if (!audio) return;
+    if (!audio) return false;
     if (!current) {
       // 以前这里是静默 return，用户点了完全没反应、也看不到原因
       setErrorMsg(
         tracks.length ? "这首歌不在歌单里，试试切换上一首/下一首" : "歌单是空的"
       );
-      return;
+      return false;
     }
     setErrorMsg("");
 
@@ -150,6 +151,7 @@ export default function MusicPlayer() {
     try {
       await audio.play();
       setPlaying(true);
+      return true;
     } catch (err) {
       // ⚠️ 把失败原因显示出来，不要静默 —— 否则用户"点了没动静"没法排查
       setPlaying(false);
@@ -161,6 +163,7 @@ export default function MusicPlayer() {
       } else {
         setErrorMsg("播放失败：" + (err?.message || name || "未知原因"));
       }
+      return false;
     }
   }, [current]);
 
@@ -202,33 +205,46 @@ export default function MusicPlayer() {
   }, [volume]);
 
   // ---------- 首次交互后自动播放 ----------
+  //
+  // ⚠️⚠️ 解锁事件必须是「用户激活」事件：pointerup / touchend / click / keydown。
+  //    以前监听的是 pointerdown / touchstart —— 这两个事件**不构成用户激活**
+  //    （见 HTML 规范的 activation triggering input event）：
+  //    手机浏览器（尤其 iOS Safari）要求 play() 必须在手势**完成**的事件里调用，
+  //    在 pointerdown 里调会被 NotAllowedError 拒绝，而且旧实现失败后
+  //    unlockedRef 已置 true、once 监听已移除 —— **永远不会再试**。
+  //    表现就是"手机上进站音乐永远不响，桌面却正常"（Chrome 对 pointerdown
+  //    处理器里的 play() 比较宽容，掩盖了这个 bug）。
   useEffect(() => {
     if (!musicConfig.autoPlay) return;
     if (!tracks.length) return;
     if (unlockedRef.current) return;
 
-    const unlock = () => {
-      if (unlockedRef.current) return;
-      unlockedRef.current = true;
-      // 记住用户开过音乐，下次进站交互后自动接上
-      localStorage.setItem("solace_music_on", "1");
-      play();
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("touchstart", unlock);
-      window.removeEventListener("keydown", unlock);
-    };
-
     // 只在用户"上次开过音乐"或首次访问时挂监听，避免用户明确暂停后又被自动唤醒
     const wasOn = localStorage.getItem("solace_music_on");
     if (wasOn === "0") return;
 
-    window.addEventListener("pointerdown", unlock, { once: true });
-    window.addEventListener("touchstart", unlock, { once: true });
-    window.addEventListener("keydown", unlock, { once: true });
+    // 不用 { once: true }：失败时要留着监听等下一次交互重试，用 unlockedRef 防重入。
+    // 同一次手势会连发 pointerup → touchend → click，等于给三次机会，
+    // 浏览器认哪个就用哪个。
+    const EVENTS = ["pointerup", "touchend", "click", "keydown"];
+    const unlock = async () => {
+      if (unlockedRef.current) return;
+      unlockedRef.current = true;
+      const ok = await play();
+      if (ok) {
+        // 记住用户开过音乐，下次进站交互后自动接上
+        localStorage.setItem("solace_music_on", "1");
+        EVENTS.forEach((name) => window.removeEventListener(name, unlock));
+      } else {
+        // 失败了（手势还没被浏览器认可，或音频源暂时有问题）：
+        // 重置解锁标记，下一次用户交互再试
+        unlockedRef.current = false;
+      }
+    };
+
+    EVENTS.forEach((name) => window.addEventListener(name, unlock));
     return () => {
-      window.removeEventListener("pointerdown", unlock);
-      window.removeEventListener("touchstart", unlock);
-      window.removeEventListener("keydown", unlock);
+      EVENTS.forEach((name) => window.removeEventListener(name, unlock));
     };
   }, [musicConfig.autoPlay, tracks.length, play]);
 
@@ -296,11 +312,19 @@ export default function MusicPlayer() {
             setExpanded(true);
           }}
           title="背景音乐（可以拖动）"
-          className={`w-10 h-10 cursor-grab rounded-full bg-white/90 backdrop-blur border border-[#d5d9d7] shadow-md flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-white transition-colors ${
+          className={`relative w-10 h-10 cursor-grab touch-none rounded-full bg-white/90 backdrop-blur border border-[#d5d9d7] shadow-md flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-white transition-colors ${
             ball.dragging ? "cursor-grabbing" : ""
           }`}
         >
           <span className={playing ? "animate-pulse" : ""}>♪</span>
+          {/* ⚠️ 播放出错时给个红点：面板收起状态下 errorMsg 在屏外，用户根本看不到 ——
+              没这个点的话，"手机上点了没动静"就完全无从下手（展开面板才能看到原因） */}
+          {errorMsg ? (
+            <span
+              className="absolute right-0 top-0 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-white"
+              title="音乐播放出了问题，点开查看原因"
+            />
+          ) : null}
         </button>
       ) : null}
 
@@ -316,12 +340,24 @@ export default function MusicPlayer() {
         }
         aria-hidden={!expanded}
       >
-          {/* 头部：标题 + 收起 */}
-          <div className="flex items-center justify-between px-3 py-2 border-b border-[#f0f2f0]">
+          {/* 头部整行 = 拖动把手（含标题、徽标、×）。
+              ⚠️ 上一版把 × 拆成把手的兄弟节点是因为 `setPointerCapture` 会把 click
+                 锁死在把手上；现在 useDraggable 已改用 window 级 pointermove 驱动，
+                 click 能正常穿透 —— 所以把手可以覆盖整行，拖动范围大得多。
+              ⚠️ 只覆盖头部这一行，不覆盖下面的歌曲列表 / 音量 / iframe：
+                 那些区域要正常点击 / 播放。
+              touch-none：触摸设备上按住拖动不会被浏览器当成滚动页面。 */}
+          <div
+            {...ball.handlers}
+            title="按住这里可以拖动"
+            className={`flex touch-none items-center justify-between border-b border-[#f0f2f0] py-2.5 pl-3 pr-2 ${
+              ball.dragging ? "cursor-grabbing" : "cursor-grab"
+            }`}
+          >
             <span className="text-xs font-medium text-slate-600">
               {showNetease ? "网易云收藏" : "背景音乐"}
             </span>
-            <div className="flex items-center gap-2">
+            <div className="flex shrink-0 items-center gap-2">
               {fellBack ? (
                 <span
                   className="text-[10px] text-amber-600"
@@ -341,11 +377,14 @@ export default function MusicPlayer() {
               <button
                 type="button"
                 onClick={() => {
+                  // ⚠️ 在把手区域拖完松手，浏览器补发的 click 会落到这个按钮上
+                  //    （它是把手的子节点）—— 用守卫拦掉，避免"拖完顺手收起"
+                  if (ball.shouldIgnoreClick()) return;
                   setExpanded(false);
                   setListOpen(false);
                 }}
-                className="text-slate-400 hover:text-slate-600 text-base leading-none px-1"
                 title="收起"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm leading-none text-slate-400 transition-colors hover:bg-black/10 hover:text-slate-600"
               >
                 ×
               </button>

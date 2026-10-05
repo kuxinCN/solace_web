@@ -15,6 +15,7 @@
  *    粘文本比"存文件 → 选文件"快得多。文件选择也支持（拖进来会走同一个入口）。
  */
 import { useCallback, useEffect, useRef, useState } from "react";
+import ConfirmModal from "@/components/ConfirmModal";
 
 const BTN =
   "rounded-lg border border-[#e2e5e2] bg-white px-3 py-1.5 text-xs text-slate-600 transition hover:border-[#c9d2c9] hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-50";
@@ -62,6 +63,8 @@ export default function ScaleManagerPanel({ api, setError, setNotice }) {
   const [rejected, setRejected] = useState([]);
   const [preview, setPreview] = useState(null);
   const fileRef = useRef(null);
+  // 自定义确认弹窗（替代 window.confirm）
+  const [confirmBox, setConfirmBox] = useState(null);
 
   const load = useCallback(
     async (silent) => {
@@ -222,15 +225,14 @@ export default function ScaleManagerPanel({ api, setError, setNotice }) {
                             type="button"
                             className={BTN}
                             disabled={busy === "delete-" + scale.id}
-                            onClick={() => {
-                              if (
-                                !window.confirm(
-                                  `删除量表「${scale.name}」？\n\n已有的测评结果不会受影响（它们是快照）。`
-                                )
-                              )
-                                return;
-                              post({ action: "delete", id: scale.id }, "删除");
-                            }}
+                            onClick={() =>
+                              setConfirmBox({
+                                message: `删除量表「${scale.name}」？\n\n已有的测评结果不会受影响（它们是快照）。`,
+                                confirmText: "删除",
+                                onConfirm: () =>
+                                  post({ action: "delete", id: scale.id }, "删除"),
+                              })
+                            }
                           >
                             删除
                           </button>
@@ -352,6 +354,15 @@ export default function ScaleManagerPanel({ api, setError, setNotice }) {
           </div>
         ) : null}
       </div>
+
+      {/* 自定义确认弹窗（替代 window.confirm） */}
+      <ConfirmModal
+        open={!!confirmBox}
+        message={confirmBox?.message || ""}
+        confirmText={confirmBox?.confirmText || "确认删除"}
+        onConfirm={confirmBox?.onConfirm || (() => {})}
+        onClose={() => setConfirmBox(null)}
+      />
     </div>
   );
 }

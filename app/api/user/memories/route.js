@@ -9,6 +9,7 @@
  */
 import { describeDbError, execute, query } from "@/lib/db";
 import { ensureUserColumnsOnce } from "@/lib/schema";
+import { saveMemory } from "@/lib/memory-store";
 import { pushToTrash } from "@/lib/trash";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
@@ -66,14 +67,19 @@ export async function POST(request) {
   const category = cleanString(body.category, MAX_CATEGORY_CHARS) || null;
 
   try {
-    // created_at 不指定，由数据库 DEFAULT CURRENT_TIMESTAMP 按北京时间生成
-    const result = await execute(
-      "INSERT INTO user_memories (user_id, content, category) VALUES (?, ?, ?)",
-      [user.id, content, category]
-    );
+    // 走统一写入口：和自动提炼的记忆一样做近似去重 ——
+    // 已存在相同/高度相似的记忆时不新增，只刷新旧记录的时间（让它重新靠前），
+    // 返回 deduplicated 让前端可以提示"这条之前已经记过了"。
+    const saved = await saveMemory(user.id, content, category);
     return json({
       ok: true,
-      memory: { id: result.insertId, user_id: user.id, content, category },
+      deduplicated: saved.status === "reinforced",
+      memory: {
+        id: saved.id || 0,
+        user_id: user.id,
+        content,
+        category,
+      },
     });
   } catch (err) {
     return jsonError(describeDbError(err), 500);
@@ -81,7 +87,7 @@ export async function POST(request) {
 }
 
 /**
- * 删除一条记忆：只允许删自己的。
+ * 删除记忆：只允许删自己的。支持单条（{ id }）与批量（{ ids: [...] }，多选删除）。
  *
  * 和日记 / 对话一样，默认**先进回收站**（保留 3 天，可在「我的 → 回收站 → 记忆」里恢复）；
  * 带 `?permanent=1` 表示彻底删除，不经过回收站。
@@ -94,24 +100,35 @@ export async function DELETE(request) {
   const permanent = url.searchParams.get("permanent") === "1";
 
   const body = await readJsonBody(request);
-  const id = parseId(body.id);
-  if (!id) return jsonError("缺少记忆 id", 400);
+  // 兼容两种传参：{ id } 单条 / { ids: [...] } 批量（一次最多 MAX_RECORDS 条）
+  const rawIds = Array.isArray(body.ids) ? body.ids : [body.id];
+  const ids = [...new Set(rawIds.map((v) => parseId(v)).filter(Boolean))].slice(
+    0,
+    MAX_RECORDS
+  );
+  if (!ids.length) return jsonError("缺少记忆 id", 400);
+
+  const placeholders = ids.map(() => "?").join(", ");
 
   try {
     // 默认「删除」：先把完整内容存进回收站，再删原记录
     if (!permanent) {
       try {
         const rows = await query(
-          "SELECT id, content, category, created_at FROM user_memories WHERE id = ? AND user_id = ? LIMIT 1",
-          [id, user.id]
+          `SELECT id, content, category, created_at FROM user_memories WHERE user_id = ? AND id IN (${placeholders})`,
+          [user.id, ...ids]
         );
-        if (rows.length) {
-          await pushToTrash({
-            userId: user.id,
-            itemType: "memory",
-            title: String(rows[0].content || "").slice(0, 40) || "一条记忆",
-            payload: rows[0],
-          });
+        for (const row of rows) {
+          try {
+            await pushToTrash({
+              userId: user.id,
+              itemType: "memory",
+              title: String(row.content || "").slice(0, 40) || "一条记忆",
+              payload: row,
+            });
+          } catch {
+            /* 单条入站失败不阻断其他条 */
+          }
         }
       } catch {
         /* 回收站写入失败不阻止删除（老库可能还没建 trash 表） */
@@ -119,11 +136,11 @@ export async function DELETE(request) {
     }
 
     const result = await execute(
-      "DELETE FROM user_memories WHERE id = ? AND user_id = ?",
-      [id, user.id]
+      `DELETE FROM user_memories WHERE user_id = ? AND id IN (${placeholders})`,
+      [user.id, ...ids]
     );
     if (!result.affectedRows) return jsonError("记忆不存在", 404);
-    return json({ ok: true });
+    return json({ ok: true, deleted: result.affectedRows });
   } catch (err) {
     return jsonError(describeDbError(err), 500);
   }

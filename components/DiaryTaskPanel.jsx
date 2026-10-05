@@ -13,6 +13,7 @@
  * 靠任务自带的 taskKind 在前端分流 —— 后端不用为日记再开一套接口。
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ConfirmModal from "@/components/ConfirmModal";
 
 /** 两类日记任务的显示名 */
 const KIND_META = {
@@ -171,6 +172,8 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
   const [busy, setBusy] = useState("");
   const [detail, setDetail] = useState(null);
   const [detailBusy, setDetailBusy] = useState(0);
+  // 自定义确认弹窗（替代 window.confirm）
+  const [confirmBox, setConfirmBox] = useState(null);
 
   const list = useCallback(
     async (silent) => {
@@ -342,16 +345,14 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
           type="button"
           className={BTN}
           disabled={busy === "retryFailed"}
-          onClick={() => {
-            if (
-              !window.confirm(
-                "把所有「失败」的任务放回待处理队列？\n\n适合换过提示词或模型之后重跑一轮。放回后点「立即提交」就会重跑。"
-              )
-            ) {
-              return;
-            }
-            runAction("retryFailed", "重试失败任务");
-          }}
+          onClick={() =>
+            setConfirmBox({
+              message:
+                "把所有「失败」的任务放回待处理队列？\n\n适合换过提示词或模型之后重跑一轮。放回后点「立即提交」就会重跑。",
+              confirmText: "放回队列",
+              onConfirm: () => runAction("retryFailed", "重试失败任务"),
+            })
+          }
           title="把失败的任务打回队列并清零重试计数，之后点「立即提交」就会重跑"
         >
           {busy === "retryFailed" ? "重试中…" : "重试失败任务"}
@@ -396,6 +397,15 @@ export default function DiaryTaskPanel({ api, setError, setNotice }) {
           </div>
         </div>
       ) : null}
+
+      {/* 自定义确认弹窗（替代 window.confirm） */}
+      <ConfirmModal
+        open={!!confirmBox}
+        message={confirmBox?.message || ""}
+        confirmText={confirmBox?.confirmText || "确认删除"}
+        onConfirm={confirmBox?.onConfirm || (() => {})}
+        onClose={() => setConfirmBox(null)}
+      />
     </div>
   );
 }

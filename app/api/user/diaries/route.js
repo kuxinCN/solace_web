@@ -81,6 +81,23 @@ export async function POST(request) {
 
   if (!content) return jsonError("先写点什么吧，哪怕一句也好", 400);
 
+  // ⚠️ 「情绪释放」专用：原稿**不进日记列表**，直接进回收站（3 天内可恢复）。
+  //    前端日记编辑区涂抹释放时带这个开关 —— 用户想丢掉的是情绪，不是这些文字，
+  //    所以不能真删掉，也不能塞进日记列表（那会变成"我什么时候写过这篇"）。
+  if (toFlag(body.toTrash)) {
+    try {
+      await pushToTrash({
+        userId: user.id,
+        itemType: "diary",
+        title: title || "情绪释放的原稿",
+        payload: { title, content, mood: null, user_mood: userMood, source: "user" },
+      });
+      return json({ ok: true, trashed: true });
+    } catch (err) {
+      return jsonError("原稿暂存失败：" + describeDbError(err), 500);
+    }
+  }
+
   try {
     // ⚠️ diary_date = **当天**：用户自己写的日记，"对应的那一天"就是写它的那天。
     //    有了它，前端展示日期就不用去猜 created_at 的时区，

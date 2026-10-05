@@ -14,8 +14,8 @@
  * 任何失败都由调用方静默处理，绝不能影响聊天主链路。
  */
 import { requestChat } from "@/lib/ai";
-import { execute } from "@/lib/db";
 import { getCurrentUser } from "@/lib/user-auth";
+import { saveMemory } from "@/lib/memory-store";
 import { json, jsonError, readJsonBody } from "@/lib/util";
 
 export const runtime = "nodejs";
@@ -25,7 +25,7 @@ const MAX_MESSAGE_CHARS = 2000; // 提炼输入长度上限
 const MAX_MEMORY_CHARS = 40; // 单条提炼结果长度
 const COOLDOWN_MS = 3 * 60 * 1000;
 
-/** 直接命中的关键词（偏好 / 关系 / 恐惧 / 事件） */
+/** 直接命中的关键词（偏好 / 关系 / 恐惧 / 事件 / 事实） */
 const TRIGGER_KEYWORDS = [
   "我喜欢",
   "我讨厌",
@@ -38,6 +38,15 @@ const TRIGGER_KEYWORDS = [
   "我一直在",
   "我不喜欢",
   "我想要",
+  // —— 事实 / 拥有类（用户说出的长期事实信息，同样值得记下）——
+  "我养",
+  "我叫",
+  "我家有",
+  "我有",
+  "我住",
+  "我工作",
+  "我今年",
+  "我在上",
 ];
 
 /** 情绪词：仅当消息 ≥ 80 字且包含任一词时才触发 */
@@ -46,7 +55,7 @@ const EMOTION_KEYWORDS = ["难过", "焦虑", "累", "烦", "开心", "委屈", 
 /** category 判定用的分组词表 */
 const RELATION_KEYWORDS = ["我妈", "我爸", "我室友", "我朋友"];
 const PREFERENCE_KEYWORDS = ["我喜欢", "我讨厌", "我不喜欢", "我想要"];
-const EVENT_KEYWORDS = ["我最近", "我一直在"];
+const EVENT_KEYWORDS = ["我最近", "我一直在", "我养", "我叫", "我家有", "我有", "我住", "我工作", "我今年", "我在上"];
 
 /** 冷却表：`${userId}:${conversationId}` → 上次提炼时间戳 */
 const lastExtractAt = new Map();
@@ -55,16 +64,22 @@ function matchKeywords(text, words) {
   return words.some((word) => text.includes(word));
 }
 
-/** 判断消息是否值得提炼：命中直接关键词；或长消息 + 情绪词 */
+// 偏好类核心词 + 程度副词容忍：
+//   覆盖"我很喜欢 / 我特别讨厌 / 我真的害怕 / 我好想要"这类带修饰的表达 ——
+//   精确词表只有"我喜欢"，"我很喜欢"不包含连续子串"我喜欢"，会漏。
+const PREFERENCE_CORE_RE = /^我.{0,3}(?:喜欢|讨厌|不喜欢|害怕|想要)/;
+
+/** 判断消息是否值得提炼：命中直接关键词；或偏好变体；或长消息 + 情绪词 */
 function shouldExtract(text) {
   if (matchKeywords(text, TRIGGER_KEYWORDS)) return true;
+  if (PREFERENCE_CORE_RE.test(text)) return true;
   return text.length >= 80 && matchKeywords(text, EMOTION_KEYWORDS);
 }
 
 /** 按命中关键词简单分类：关系 > 偏好 > 情绪 > 事件 */
 function classifyCategory(text) {
   if (matchKeywords(text, RELATION_KEYWORDS)) return "relation";
-  if (matchKeywords(text, PREFERENCE_KEYWORDS)) return "preference";
+  if (matchKeywords(text, PREFERENCE_KEYWORDS) || PREFERENCE_CORE_RE.test(text)) return "preference";
   if (matchKeywords(text, EMOTION_KEYWORDS)) return "emotion";
   if (matchKeywords(text, EVENT_KEYWORDS)) return "event";
   return "event";
@@ -125,16 +140,13 @@ export async function POST(request) {
 
   const category = classifyCategory(userMessage);
 
+  // 统一写入口：与模型自主通道（[MEMORY:]）近似去重 ——
+  // 同一件事两个通道都抓到时只保留一条；用户重复提起则刷新旧记忆的时间戳（强化浮升）。
   try {
-    // created_at 不指定，由数据库 DEFAULT CURRENT_TIMESTAMP 按北京时间生成
-    await execute(
-      "INSERT INTO user_memories (user_id, content, category) VALUES (?, ?, ?)",
-      [user.id, content, category]
-    );
+    const saved = await saveMemory(user.id, content, category);
+    return json({ saved: true, status: saved.status, content, category });
   } catch (err) {
     console.warn("[memory] 提炼结果写入失败:", err?.code || err?.message || err);
     return json({ skipped: true, reason: "db-failed" });
   }
-
-  return json({ saved: true, content, category });
 }

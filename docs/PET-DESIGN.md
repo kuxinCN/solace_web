@@ -240,7 +240,7 @@ useEffect(() => {
 
 | 项目 | 负载 | 现有应对 |
 |---|---|---|
-| **`npm run build`** | ⚠️ **峰值最高** | `pm2 stop solace` → 构建 → `pm2 start` |
+| **`npm run build`** | ⚠️ **峰值最高** | 先构建、最后才切换服务；只有内存 <2G 才先 `pm2 stop`，且整段交给脚本 / `nohup`（INC-014） |
 | **MySQL** | ⚠️ 中等，**曾因 OOM 被杀** | 已加 2G swap（`/swapfile`）+ `systemctl enable mysqld` |
 | **AI 流式响应** | ⚠️ 占 Node 并发（等 API 时挂起） | 走外部 API，CPU 不累，但连接池只有 5 |
 | **TTS** | ⚠️ 占带宽 | 走外部 API |

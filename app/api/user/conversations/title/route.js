@@ -10,9 +10,11 @@
  *   * 用户已经手动改过名字的对话**不会被覆盖**（尊重用户）；
  *   * 调 AI 要花钱，按用户限流。
  */
-import { generateConversationTitle } from "@/lib/ai";
+import { generateConversationTitle, fallbackTitleFromMessage } from "@/lib/ai";
 import { describeDbError, execute, query } from "@/lib/db";
 import { rateLimit } from "@/lib/rate-limit";
+import { getGroup } from "@/lib/settings";
+import { isStyleTagsEnabled, stripTagsFromMessages, tagWordsFrom } from "@/lib/tts-tags";
 import { getCurrentUser } from "@/lib/user-auth";
 import { json, jsonError, readJsonBody } from "@/lib/util";
 
@@ -72,18 +74,40 @@ export async function POST(request) {
       return json({ ok: true, title: oldTitle, skipped: true });
     }
 
-    const result = await generateConversationTitle({ messages });
-    if (!result.ok) {
-      return jsonError(result.error || "暂时无法生成标题，请稍后再试", 502);
+    // ⚠️ 标题是从 AI 的回复里总结出来的，带着朗读标签（`[温柔]`）会很怪 —— 先剥掉。
+    //    按配置判定：没开 / 不是小米 MiMo 时一个字符都不动（见 lib/tts-tags.js）。
+    let titleMessages = messages;
+    try {
+      const ttsConfig = await getGroup("tts");
+      if (isStyleTagsEnabled(ttsConfig)) {
+        titleMessages = stripTagsFromMessages(messages, tagWordsFrom(ttsConfig));
+      }
+    } catch {
+      /* 读不到配置就按"原文里没有标签"处理 */
     }
 
+    const result = await generateConversationTitle({ messages: titleMessages });
+    // ⚠️ AI 失败 / 模型说"无" 时，**由后端直接给出兜底标题并落库** ——
+    //    不要返回错误丢给前端，前端那时手里只有原话，一不小心就把**整句话**
+    //    搬进左侧对话列表（历史版本就是 `text.slice(0, 15)`，列表被撑爆）。
+    //    这里统一用"首条消息切一刀"的短标题，前端拿到的永远是可用标题。
+    const title = result.ok
+      ? result.title
+      : fallbackTitleFromMessage(messages.find((m) => m?.role === "user")?.content || "");
+
     await execute("UPDATE conversations SET title = ? WHERE id = ? AND user_id = ?", [
-      result.title,
+      title,
       conversationId,
       user.id,
     ]);
 
-    return json({ ok: true, title: result.title, skipped: false });
+    return json({
+      ok: true,
+      title,
+      skipped: false,
+      fallback: !result.ok,
+      ...(result.ok ? {} : { reason: result.error }),
+    });
   } catch (err) {
     return jsonError(describeDbError(err), 500);
   }

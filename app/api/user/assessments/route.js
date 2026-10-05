@@ -10,11 +10,12 @@
 import { describeDbError, execute, query } from "@/lib/db";
 import { getCurrentUser } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
+import { getScale, listScales } from "@/lib/scales";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// type 白名单
+// type 白名单（POST 只允许这两种；量表结果走 /api/user/scales 提交）
 const VALID_TYPES = new Set(["personality", "emotion"]);
 const MAX_RECORDS = 100; // 最多返回 100 条，避免拉太多
 
@@ -98,9 +99,54 @@ export async function GET(request) {
   if (!user) return jsonError("请先登录", 401);
 
   const url = new URL(request.url);
-  const type = cleanString(url.searchParams.get("type"), 16);
+  const type = cleanString(url.searchParams.get("type"), 64);
+  if (!type) return jsonError("未知的测评类型", 400);
+
+  // 量表卡片状态：每个已启用量表的最近一次结果（type = 题库 id）
+  if (type === "scales-latest") {
+    try {
+      const enabled = await listScales({ onlyEnabled: true });
+      const scaleIds = enabled.map((s) => s.id).filter(Boolean);
+      if (!scaleIds.length) return json({ ok: true, scales: [] });
+
+      const placeholders = scaleIds.map(() => "?").join(", ");
+      const rows = await query(
+        `SELECT
+           id,
+           type,
+           JSON_UNQUOTE(JSON_EXTRACT(data, '$')) AS data,
+           created_at
+         FROM assessment_results
+         WHERE user_id = ? AND type IN (${placeholders})
+         ORDER BY created_at DESC, id DESC
+         LIMIT ${MAX_RECORDS}`,
+        [user.id, ...scaleIds]
+      );
+
+      // rows 已按时间倒序，每个 type 第一次出现即最新一条
+      const seen = new Set();
+      const scales = [];
+      for (const r of rows) {
+        if (seen.has(r.type)) continue;
+        seen.add(r.type);
+        let parsed = null;
+        try {
+          parsed = typeof r.data === "string" ? JSON.parse(r.data) : r.data;
+        } catch {
+          parsed = null;
+        }
+        scales.push({ id: r.id, type: r.type, data: parsed, created_at: r.created_at });
+      }
+      return json({ ok: true, scales });
+    } catch (err) {
+      return jsonError(describeDbError(err), 500);
+    }
+  }
+
+  // 单套量表的完整历史：type 必须是一个「已启用」的题库 id（防止把任意字符串当查询条件）
   if (!VALID_TYPES.has(type)) {
-    return jsonError("未知的测评类型", 400);
+    const scale = await getScale(type);
+    if (!scale || !scale.enabled) return jsonError("未知的测评类型", 400);
   }
 
   try {

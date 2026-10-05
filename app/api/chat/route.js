@@ -16,11 +16,20 @@ import { SUSPECT_INSTRUCTION, recordSuspected, takeRiskTag } from "@/lib/suspect
 import { execute, query } from "@/lib/db";
 import { withTiming } from "@/lib/perf";
 import { buildStyleBlock } from "@/lib/portrait";
+import { extractMemoryMarkers, stripMemoryMarkers } from "@/lib/memory-marker";
+import { buildTtsTagInstruction, isStyleTagsEnabled, stripTagsFromMessages, tagWordsFrom } from "@/lib/tts-tags";
+import {
+  buildMemoryMessage,
+  loadMemoryCandidates,
+  saveMemory,
+  selectMemoryRows,
+} from "@/lib/memory-store";
 import { getPortrait } from "@/lib/portrait-store";
 import { recordAiUsage } from "@/lib/usage";
 import { rateLimit } from "@/lib/rate-limit";
 import { getGroup } from "@/lib/settings";
 import { getCurrentUser } from "@/lib/user-auth";
+import { decideSticker, stripStickerMarkers } from "@/lib/sticker-engine";
 import { clientIp } from "@/lib/util";
 
 export const runtime = "nodejs";
@@ -50,55 +59,19 @@ const DEFAULT_DIARY_TEMPLATE = [
   "日记正文：\n{diary}",
 ].join("\n");
 
-/** 长期记忆注入：最多取最近 20 条，拼成一条 system 消息，总长控制在 800 字以内 */
-const MEMORY_LIMIT = 20;
-const MEMORY_TOTAL_CHARS = 800;
-const MEMORY_HEADER =
-  "以下是用户之前提过的重要信息，作为背景参考，不要每次都主动提起，只在相关时自然引用：";
-
-/**
- * 取该用户最近的记忆。
- * 表不存在 / 查询异常都静默返回空数组 —— 记忆是锦上添花，绝不能拖垮聊天。
- */
-async function loadRecentMemories(userId) {
-  try {
-    const rows = await query(
-      `SELECT content FROM user_memories WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT ${MEMORY_LIMIT}`,
-      [userId]
-    );
-    return rows;
-  } catch {
-    return [];
-  }
-}
-
 /**
  * 给记忆查询加一道时间上限：万一表被锁或查询卡住，
  * 也只是这次不注入记忆，绝不拖着首字延迟。
  * 800ms 已覆盖远端库正常往返，异常情况下比旧版 1200ms 少等 400ms。
+ *
+ * ⚠️ 记忆的去重写入（saveMemory）与相关性精选（selectMemoryRows / buildMemoryMessage）
+ *    统一在 lib/memory-store.js，本文件只负责"并行发查询 + 超时兜底 + 拼进 systemBlock"。
  */
 function withMemoryTimeout(promise, ms = 800) {
   return Promise.race([
     promise,
-    new Promise((resolve) => setTimeout(() => resolve([]), ms)),
+    new Promise((resolve) => setTimeout(() => resolve({ facts: [], daily: [] }), ms)),
   ]);
-}
-
-/** 把记忆拼成一条 system 消息；没有可用内容时返回 null（不插入） */
-function buildMemoryMessage(rows) {
-  if (!Array.isArray(rows) || !rows.length) return null;
-  const lines = [];
-  let used = MEMORY_HEADER.length;
-  for (const row of rows) {
-    const text = String(row?.content ?? "").trim();
-    if (!text) continue;
-    const line = `- ${text}`;
-    if (used + line.length + 1 > MEMORY_TOTAL_CHARS) break;
-    lines.push(line);
-    used += line.length + 1;
-  }
-  if (!lines.length) return null;
-  return { role: "system", content: `${MEMORY_HEADER}\n${lines.join("\n")}` };
 }
 
 /** .env.local 里的智谱配置，作为数据库配置缺失时的兜底 */
@@ -157,13 +130,21 @@ async function handleChat(request) {
 
   const wantStream = payload?.stream === true;
 
-  // 长期记忆与 AI 配置互不依赖，并行发出：两者各需一次远端查询，
-  // 串行会给首字延迟叠加一次往返（实测单次 0.5~1.5 秒）。
-  const memoriesPromise = loadRecentMemories(user.id);
+  // 长期记忆候选（事实池 100 条 + 日报 2 条）与 AI 配置互不依赖，并行发出：
+  // 两者各需一次远端查询，串行会给首字延迟叠加一次往返（实测单次 0.5~1.5 秒）。
+  // 本轮用户消息要等 normalize 之后才有，所以这里只发"查询"，
+  // 相关性精选（纯 JS）放到拼 systemBlock 时做，不把查询拖成串行。
+  const memoryCandidatesPromise = loadMemoryCandidates(user.id);
 
   let config = null;
+  // 朗读标签要不要注入取决于 TTS 分组的两个字段（接口类型 + 开关），
+  // 与 AI 配置互相不依赖 —— 并行读，不给首字延迟再加一次串行往返。
+  let ttsConfig = null;
   try {
-    config = await getGroup("ai");
+    [config, ttsConfig] = await Promise.all([
+      getGroup("ai"),
+      getGroup("tts").catch(() => null),
+    ]);
   } catch {
     config = null;
   }
@@ -184,7 +165,15 @@ async function handleChat(request) {
   //   * 读日记时，把日记正文按后台配置的模板拼进去（模板里的 {diary} 会被替换成正文）
   const incoming = normalizeMessages(payload?.messages);
   const frontEndSystem = incoming.filter((item) => item.role === "system");
-  const dialogue = incoming.filter((item) => item.role !== "system");
+  // ⚠️ 回喂给模型的历史要先剥掉朗读标签：
+  //    模型看到自己上一轮的 `[温柔]` 会越贴越多，而且标签对"读上下文"没有信息量。
+  //    只动 assistant 的消息 —— 用户自己打的括号是内容（见 lib/tts-tags.js）。
+  //    不生效时（没开 / 不是 MiMo）不碰任何东西，行为与加这个功能之前一致。
+  const historyTagWords = isStyleTagsEnabled(ttsConfig) ? tagWordsFrom(ttsConfig) : null;
+  const dialogue = stripTagsFromMessages(
+    incoming.filter((item) => item.role !== "system"),
+    historyTagWords
+  );
 
   // 按用户选择的 AI 人格取提示词：male / female 各一份，都没选就用默认那份。
   // persona 来自会话查询（lib/user-auth.js 里一并取出），不用再单独查一次数据库。
@@ -226,8 +215,31 @@ async function handleChat(request) {
     console.warn("[portrait] 读画像失败，本次只用全局人格提示词：", err?.message || err);
   }
 
-  // 长期记忆：放在人格提示词之后（最多 20 条 / 总长 800 字以内），为空则不插入
-  const memoryMessage = buildMemoryMessage(await withMemoryTimeout(memoriesPromise));
+  // ---- 朗读标签（情绪 / 声音事件）----
+  //
+  // 让 AI 在回复里内嵌 `[温柔]`、`(叹气)` 这类标签，小米 MiMo 朗读时按标签控语气。
+  // 存库存的是**带标签的原文**，用户看到的气泡由前端剥掉（见 lib/tts-tags.js）。
+  //
+  // ⚠️ **只在请求时拼接，绝不写进后台的人格提示词**：
+  //    人格提示词存在数据库里、所有部署共用一份 —— 一旦写进去，
+  //    "OpenAI 兼容 TTS"的部署也会让 AI 输出标签，然后被一字一顿念出来。
+  // ⚠️ 位置与心理画像一致：人格之后、长期记忆之前（同属"该怎么说话"的指令，
+  //    不是"回忆内容"），不占用紧贴用户消息那个注意力最高的位置。
+  // ⚠️ 不生效时**什么都不加**：行为和上这个功能之前完全一样。
+  const ttsTagBlock = buildTtsTagInstruction(ttsConfig);
+  if (ttsTagBlock) systemBlock.push({ role: "system", content: ttsTagBlock });
+
+  // 长期记忆：放在人格提示词之后，为空则不插入。
+  // 候选池（事实 100 + 日报 2）已并行取回，这里按"本轮最后一条用户消息"
+  // 做 bigram 相关性精选 + 分层（daily ≤2 / 相关事实 ≤14 / 无关时只留 6 条最近），
+  // 最相关的行排在记忆块最后（紧贴用户消息，GLM 对靠前 system 注意力弱）。
+  // 800 字总上限和 800ms 查询超时两条硬兜底保持不变。
+  const memoryQueryText =
+    [...dialogue].reverse().find((item) => item.role === "user")?.content || "";
+  const memoryCandidates = await withMemoryTimeout(memoryCandidatesPromise);
+  const memoryMessage = buildMemoryMessage(
+    selectMemoryRows(memoryCandidates, memoryQueryText)
+  );
   if (memoryMessage) systemBlock.push(memoryMessage);
 
   // 日记正文：作为最后一条 system 消息，与本轮用户消息直接相邻，确保模型一定读到
@@ -365,6 +377,48 @@ async function handleChat(request) {
     }
   })();
 
+  // ---------------- 表情包：情绪判定与主对话流**并行** ----------------
+  //
+  // 关键词命中是毫秒级；判不出才并行调一次轻量 AI（引擎内部 2.5s 超时即放弃）。
+  // 这里只"发起"不 await —— 与上游 AI 的文字流式同时跑，流末才取结果，
+  // 无论判定走不走 AI，都不会拖慢首字。"重新生成"是重放旧消息而非新发言，不计数。
+  //
+  // ⚠️ 分类 spec（词表 / 优先级 / 深夜放宽 / 哪些分类可触发）是**后台配的、存在库里**的，
+  //    所以这里要先读一次（`lib/sticker-store.js` 里带 30 秒缓存，不是每句话都查库）。
+  //    读不到就用引擎的出厂默认分类 —— 读配置失败不该让贴纸功能整个消失。
+  const stickerDecisionPromise =
+    payload?.regenerate === true
+      ? Promise.resolve(null)
+      : (async () => {
+          try {
+            // 表情包总开关：关掉就连计数都不做，省掉一次情绪判定
+            if ((await getGroup("sticker"))?.enabled === false) return null;
+
+            let spec = null;
+            try {
+              const { readStickerSpec } = await import("@/lib/sticker-store");
+              spec = await readStickerSpec();
+            } catch (err) {
+              console.warn(
+                "[sticker] 读取表情包分类配置失败，改用出厂默认分类：",
+                err?.message || err
+              );
+            }
+
+            return await decideSticker({
+              userId: user.id,
+              conversationId: payload?.conversationId,
+              // 日记场景前端显式传入"标题+正文"作为情绪判断文本；普通聊天用最后一条用户消息
+              text: payload?.emotionText || lastUserMessage?.content || "",
+              config,
+              spec,
+            });
+          } catch (err) {
+            console.warn("[sticker] 表情包判定失败：", err?.message || err);
+            return null;
+          }
+        })();
+
   // ---------------- 非流式：直接返回完整回复 ----------------
   if (!wantStream) {
     const startedAt = Date.now();
@@ -396,9 +450,28 @@ async function handleChat(request) {
     //    "这只是日常表达"，那就把标记摘掉、也不补热线。
     //    **其他一切情况（没写 / 写错 / 写一半）都按有风险处理** —— 见 suspected-store.js。
     const verdict = isSuspect ? takeRiskTag(result.reply) : { text: result.reply, noRisk: false };
-    const reply = safeMode && !verdict.noRisk ? ensureHotline(verdict.text) : verdict.text;
+    let reply = safeMode && !verdict.noRisk ? ensureHotline(verdict.text) : verdict.text;
 
-    return Response.json({ reply, fallback: false });
+    // 模型自主记忆（[MEMORY:xxx]）：从展示文本里剥标记，fire-and-forget 写库
+    const markers = extractMemoryMarkers(result.reply);
+    if (markers.length) {
+      reply = stripMemoryMarkers(reply);
+      const marker = markers[markers.length - 1];
+      void (async () => {
+        try {
+          // 走统一写入口：与关键词通道近似去重，重复提及只强化不新增
+          await saveMemory(user.id, marker, "self");
+        } catch (err) {
+          console.warn("[chat] 自主记忆写入失败：", err?.message || err);
+        }
+      })();
+    }
+
+    // 模型自主写的贴纸标记一律剥掉：贴纸只能来自情绪节流引擎的决策
+    reply = stripStickerMarkers(reply);
+
+    const sticker = await stickerDecisionPromise;
+    return Response.json({ reply, fallback: false, sticker: sticker?.category || null });
   }
 
   // ---------------- 流式：把上游 SSE 逐段转发给前端 ----------------
@@ -543,6 +616,47 @@ async function handleChat(request) {
               send({ delta: fixed.slice(verdict.text.length) });
             }
           }
+        }
+
+        // ---------------- 模型自主决策记忆（[MEMORY:xxx]） ----------------
+        //
+        // 在安全兜底**之后**、sendDone 之前解析：只影响"要不要记"，绝不等流式收尾。
+        //   * 从累积的完整回复里摘标记（最多取最后一条）；
+        //   * 气泡整体换成"剥掉 RISK + MEMORY 标记"的干净版（前端认得 replace 就生效）；
+        //   * 安全模式下保证热线仍在（ensureHotline 只追加不覆盖）；
+        //   * 写库 fire-and-forget，任何失败只打日志。
+        const memoryMarkers = extractMemoryMarkers(fullText);
+        // 模型私自写的贴纸标记也要整体替换掉（流式期间可能短暂露出过，replace 收回）
+        const hasStickerMark = /\[sticker:[a-z0-9]+\]/i.test(fullText);
+        if (memoryMarkers.length || hasStickerMark) {
+          const cleanBase = takeRiskTag(fullText).text;
+          let clean = stripMemoryMarkers(cleanBase);
+          // 贴纸唯一合法来源是下面的节流引擎 sticker 事件，不允许模型自己"夹带"
+          clean = stripStickerMarkers(clean);
+          if (safeMode) clean = ensureHotline(clean);
+          send({ replace: clean });
+
+          if (memoryMarkers.length) {
+            const marker = memoryMarkers[memoryMarkers.length - 1];
+            void (async () => {
+              try {
+                // 走统一写入口：与关键词通道近似去重，重复提及只强化不新增
+                await saveMemory(user.id, marker, "self");
+              } catch (err) {
+                console.warn("[chat] 自主记忆写入失败：", err?.message || err);
+              }
+            })();
+          }
+        }
+
+        // ---------------- 情绪贴纸（节流引擎） ----------------
+        //
+        // 决策在主对话流开始时就并行发起了（关键词毫秒判 / AI 兜底 2.5s 超时），
+        // 这里只是取结果；达标才发一条独立 SSE 事件，前端把它贴在消息末尾，
+        // 不插入任何文字、不影响已结束的文字流。
+        const sticker = await stickerDecisionPromise;
+        if (sticker?.category) {
+          send({ sticker: sticker.category });
         }
 
         sendDone();

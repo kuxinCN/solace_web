@@ -314,4 +314,90 @@ CREATE TABLE IF NOT EXISTS `assessment_results` (
   CONSTRAINT `fk_assessment_user` FOREIGN KEY (`user_id`)
     REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='测评历史记录';
+
+-- ---------------------------------------------------------------------------
+-- 桌宠（蓝蝴蝶）：形象库 / 情绪选项 / 回复话术
+--   * 开关与「当前用哪张形象」在 settings 的 pet 分组里，这里只放列表内容
+--   * 播种策略是「表为空才播种」—— 管理员删掉的那条不会被下次部署加回来
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `pet_images` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `name`       VARCHAR(64)  NOT NULL COMMENT '形象名称（只在后台显示）',
+  `url`        VARCHAR(300) NOT NULL COMMENT '图片地址，如 /pets/xxx.png 或内置的 /stickers/blue_butterfly.png',
+  `filename`   VARCHAR(200) NULL COMMENT '磁盘文件名（删除时定位用；外链可空）',
+  `enabled`    TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 可用 / 0 停用',
+  `sort_order` INT          NOT NULL DEFAULT 0 COMMENT '越小越靠前',
+  `admin_note` VARCHAR(200) NULL COMMENT '仅后台可见的备注',
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_pet_images` (`enabled`, `sort_order`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='桌宠形象库';
+
+CREATE TABLE IF NOT EXISTS `pet_moods` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `mood_key`   VARCHAR(32)  NOT NULL COMMENT '情绪键（程序内唯一，如 unhappy）',
+  `label`      VARCHAR(32)  NOT NULL COMMENT '用户看到的那句选项文案',
+  `anim`       VARCHAR(16)  NOT NULL DEFAULT 'droop' COMMENT 'droop/descend/shake/spin/goto；goto=切去聊天',
+  `stay_ms`    INT UNSIGNED NOT NULL DEFAULT 3000 COMMENT '回复气泡停留毫秒（goto 恒为 0）',
+  `droop`      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '1=选过之后进入低垂状态（前端记 localStorage）',
+  `sort_order` INT          NOT NULL DEFAULT 0,
+  `enabled`    TINYINT(1)   NOT NULL DEFAULT 1,
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_pet_mood_key` (`mood_key`),
+  KEY `idx_pet_moods` (`enabled`, `sort_order`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='桌宠情绪选项（用户点的那排按钮）';
+
+CREATE TABLE IF NOT EXISTS `pet_lines` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `mood_id`    INT UNSIGNED NOT NULL COMMENT '挂在哪个情绪选项下',
+  `text`       VARCHAR(200) NOT NULL COMMENT '桌宠回复的话（浮出气泡里显示）',
+  `sort_order` INT          NOT NULL DEFAULT 0,
+  `enabled`    TINYINT(1)   NOT NULL DEFAULT 1,
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_pet_lines_mood` (`mood_id`, `enabled`, `sort_order`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='桌宠回复话术（一条情绪可挂多条，随机挑）';
+
+-- ---------------------------------------------------------------------------
+-- 表情包（贴纸）：分类 + 素材
+--   * 分类即「情绪」，词表 / 优先级 / 是否纳入 AI 判定 / 是否可触发 都在这里
+--   * sleep 目录对应 sleepy 情绪，这是历史命名，别改
+--   * daily 的 triggerable=0：只作 AI 兜底分类，永不主动发图
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `sticker_categories` (
+  `id`          INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `cat_key`     VARCHAR(32)  NOT NULL COMMENT '情绪内部名（程序内用，如 comfort）',
+  `sticker_key` VARCHAR(32)  NOT NULL COMMENT '素材目录名 = [sticker:xxx] 标记名（如 sleep）',
+  `label`       VARCHAR(32)  NOT NULL COMMENT '后台显示名',
+  `keywords`    TEXT         NULL COMMENT '触发关键词，换行分隔',
+  `priority`    INT          NOT NULL DEFAULT 100 COMMENT '数字越小越优先（一句话命中多类时用）',
+  `late_night`  TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '1=深夜放宽（第 1 句 60% / 第 2 句 100%）',
+  `ai_detect`   TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1=纳入 AI 兜底的类别枚举',
+  `triggerable` TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '0=只判定不触发（daily 就是这种）',
+  `enabled`     TINYINT(1)   NOT NULL DEFAULT 1,
+  `sort_order`  INT          NOT NULL DEFAULT 0,
+  `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sticker_cat_key` (`cat_key`),
+  UNIQUE KEY `uk_sticker_sticker_key` (`sticker_key`),
+  KEY `idx_sticker_categories` (`enabled`, `priority`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='表情包分类（词表 / 优先级 / 触发规则）';
+
+CREATE TABLE IF NOT EXISTS `stickers` (
+  `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `category`   VARCHAR(32)  NOT NULL COMMENT '= sticker_categories.sticker_key（素材目录名）',
+  `url`        VARCHAR(300) NOT NULL COMMENT '原始相对路径，如 /stickers/comfort/x.jpg（前端逐段 encodeURIComponent）',
+  `filename`   VARCHAR(200) NOT NULL COMMENT '磁盘文件名（删除时定位用）',
+  `enabled`    TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '1 可用 / 0 停用',
+  `sort_order` INT          NOT NULL DEFAULT 0,
+  `admin_note` VARCHAR(200) NULL COMMENT '仅后台可见的备注',
+  `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_stickers` (`category`, `enabled`, `sort_order`, `id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='表情包素材';
+
 -- ============================================================================

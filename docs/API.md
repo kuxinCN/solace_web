@@ -105,7 +105,7 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 |---|---|---|
 | `GET` | `/api/admin/overview` | 环境信息、数据库状态、各模块是否配置就绪、最近审计日志 |
 | `GET` | `/api/admin/dashboard?days=7` | **数据看板**：总量、今日新增、活跃用户、用户/消息趋势、情绪分布、活跃用户 Top5 |
-| `GET` | `/api/admin/settings` | 读取全部配置分组（`ai` / `tts` / `smtp` / `login` / `site` / `admin` / `users`） |
+| `GET` | `/api/admin/settings` | 读取全部配置分组（`ai` / `tts` / `smtp` / `login` / `site` / `admin` / `users` / `pet` / `sticker`） |
 | `PUT` | `/api/admin/settings` | 保存某个分组：`{ group, values }` |
 | `GET` | `/api/admin/users` | 用户列表，支持 `?keyword=&status=&page=&pageSize=` |
 | `POST` | `/api/admin/users` | 新建用户 |
@@ -119,6 +119,15 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 | `POST` | `/api/admin/database` | 保存并热切换数据库连接（先测试连通性，失败不改） |
 | `POST` | `/api/admin/mail/test` | 发送测试邮件 |
 | `POST` | `/api/admin/tts/test` | 试听语音合成 |
+| `GET` / `POST` / `PATCH` / `DELETE` | `/api/admin/pet/images` | 桌宠**形象库**：列表（含"当前用哪张"与磁盘占用）/ 新增 / 改名与启停 / 删除（删掉当前那张会自动回退内置默认图） |
+| `POST` | `/api/admin/pet/images/upload` | 上传形象（multipart：`file`；≤2MB；扩展名白名单 + **魔数嗅探**，拒收改名成图片的 SVG；存 `public/pets/`） |
+| `POST` | `/api/admin/pet/images/active` | 设为当前形象（`{ id }`；`0` = 用内置默认图；会校验该形象存在且启用） |
+| `GET` / `POST` / `PATCH` / `DELETE` | `/api/admin/pet/moods` | 桌宠**情绪选项**：增删改查 / 启停 / 动画 / 停留时长 / 是否低垂（`mood_key` 建好不可改；删除会级联删该情绪的话术） |
+| `GET` / `POST` / `PATCH` / `DELETE` | `/api/admin/pet/lines` | 桌宠**回复话术**（挂在情绪下，一条情绪最多 20 句；`?moodId=` 可过滤） |
+| `GET` / `PATCH` / `DELETE` | `/api/admin/stickers` | 表情包**素材**：列表（含每个目录的磁盘占用）/ 启停与排序 / 删除（连带删磁盘文件） |
+| `POST` | `/api/admin/stickers/upload` | 上传素材（multipart：`file` + `category`；≤2MB；魔数嗅探；**保留原文件名**，同名追加时间戳不覆盖） |
+| `POST` | `/api/admin/stickers/scan` | 「重新扫描目录」：把分类目录里还没登记过的图批量补登记（`{ category }`）—— 给"手工往目录丢图"的老流程兜底 |
+| `GET` / `POST` / `PATCH` / `DELETE` | `/api/admin/stickers/categories` | 表情包**分类（= 情绪）**：增删改查 / 启停 / 关键词词表 / 优先级 / 深夜放宽 / 是否纳入 AI 判定 / 是否可主动发图（删除前要求先清空该分类的素材） |
 
 > `GET /api/admin/settings` 返回的内容**包含 API Key 与 SMTP 密码**（后台需要能编辑回显），所以这个接口必须走登录态，不要外泄响应内容。
 
@@ -236,6 +245,9 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 - **系统提示词由后端从数据库注入**（后台「对话 AI」可改，保存即生效，不用重启）
 - 前端传来的 `system` 消息在后台配置了提示词时会被覆盖；后台留空则使用前端的
 - `diaryContext` 会按后台配置的模板（`{diary}` 占位符）拼进上下文
+- **朗读标签**（仅小米 MiMo + 开关打开时）：会在心理画像之后、长期记忆之前多注入一条 system 指令，
+  让 AI 在回复里带上 `[温柔]`、`(叹气)`；回喂的历史消息里这些标签会先被剥掉（细则见第十节）
+- ⚠️ 这条指令**不存在数据库里**，是每次请求现拼的 —— 所以切换接口类型不会留下"AI 还在吐标签"的残留
 
 ### `POST /api/tts`
 
@@ -244,6 +256,16 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 ```json
 { "text": "要朗读的文字", "voice": "（可选）覆盖默认音色" }
 ```
+
+> ⚠️ 传进来的 `text` 里可能带着朗读标签（`(温柔)` `[叹气]`）：**小米 MiMo 需要它们**来控制语气，
+> 所以原样发上游；其它接口类型会在发上游**之前**剥掉 —— 否则标签会被一字一顿念出来。
+> 服务端这一层剥离不是多余的：库里存的是带标签的原文，而用户随时可能把接口类型从 MiMo 换成别家。
+>
+> ⚠️ **发上游前还会做三层"去噪"**（与是否 MiMo 无关），因为那些东西会被念出来：
+> ① emoji（`😊` → "笑脸"）；② 颜文字 / ASCII 画 / 网址（`(￣▽￣)ノ 来一个` → 念成「侬来一个」）；
+> ③ **白名单之外的括号内容**（人设的"括号动作描写"：半角会被念出来，全角会把整句合成搞成乱码）。
+> 所以这个接口读不到的东西，不代表库里没有 —— 屏幕、库、朗读文本三者是按各自规则处理的。
+> 细则见 [`TTS.md`](./TTS.md)（§三·五 朗读侧净化）或本文第十节。
 
 支持两种协议，在后台「语音 TTS」的「接口类型」里选：
 
@@ -313,13 +335,64 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 
 ---
 
-## 附：数据库表（13 张）
+## 九、桌宠与表情包（用户端配置 + 后台管理）
+
+这两个功能的内容都是**数据库驱动 + 后台可配**的，用户端各有一个**公开**的「一次拿全」接口：
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| `GET` | `/api/pet` | 公开 | 桌宠配置：`{ ok, pet: { enabled, imageUrl, imageName, size, lineRepeatHours, moods[] } }`，`moods[]` 每条含 `key / label / anim / stay / droop / lines[]`。⚠️ **一次拿全是刻意的**：用户点情绪时不能再请求网络，否则"蝴蝶回应你"会卡在网络往返上 |
+| `GET` | `/api/stickers` | 公开 | 表情包资源表：`{ ok, enabled, categories: [{ key, catKey, label, items: [{ url }] }] }`，只含**启用中**的分类与素材，空分类不返回。前端进站预取后就地改写 `STICKER_MAP`（拉不到就用内置四张兜底） |
+
+后台接口见第四节里 `pet` / `stickers` 那几行。几个约定：
+
+- **配置分组 vs 内容表**：桌宠的开关 / 显示边长 / 话术去重时间走 `PUT /api/admin/settings` 的 `pet` 分组，
+  表情包总开关走 `sticker` 分组；形象、情绪、话术、分类、素材都是**独立表 + 独立接口**。
+- **改完立即生效**：后台的写操作会让表情包引擎那份分类缓存（30 秒 TTL，`lib/sticker-store.js`）
+  立刻失效，用户端刷新页面即按新配置走，**不用重启、也不用等缓存过期**。
+- **对 `POST /api/chat` 的影响**：每条用户消息会先读一次表情包的配置（总开关 + 分类 spec）。
+  总开关关闭 → 连情绪判定都不做；分类 spec 读不到 → 回落引擎的出厂默认分类（贴纸功能不会因此消失）。
+  SSE 事件 `{"sticker":"<标记名>"}` 和消息末尾的 `[sticker:<标记名>]` 协议**没有变**。
+- **上传目录**：桌宠形象 → `public/pets/`；表情包素材 → `public/stickers/<分类目录>/`。
+  ⚠️ 这些文件**只在服务器磁盘上，不在数据库里** —— 备份与迁移时要一起带走（见 OPERATIONS.md）。
+
+---
+
+## 十、语音朗读标签（TTS 情绪 / 声音事件）
+
+只与**小米 MiMo** 有关的一个能力：让 AI 在回复里自然带上 `[温柔]`、`(叹气)`，MiMo 朗读时按标签控语气。
+完整细则（协议、剥离边界、词表、坑）见 [`TTS.md`](./TTS.md)；这里只记接口层的行为。
+
+| 方法 | 路径 | 认证 | 说明 |
+|---|---|---|---|
+| `GET` | `/api/tts/config` | 公开 | 用户端剥标签用：`{ ok, tts: { enabled, provider, styleTags, styleTagWords, eventTagWords } }`。⚠️ **只回这五个字段**，绝不含 `apiKey` / `baseUrl`；读配置失败时 `provider` 返回空串 —— 前端因此不剥标签，与服务端"读不到配置就不注入标签指令"自洽 |
+
+三个接口各自的行为：
+
+| 接口 | 朗读标签相关的行为 |
+|---|---|
+| `POST /api/chat` | 生效时注入一条标签指令；回喂历史前剥掉 assistant 侧的标签（用户消息一律不动） |
+| `POST /api/tts` | 小米 MiMo → 原样带上标签；其它接口类型 → 发上游前剥掉。剥到只剩标签时返回 400「剥掉朗读标签后没有可念的内容」。**之后还有三层去噪**（emoji / 颜文字 / 非标签的括号内容），标记与动作描写都不会出现在语音里 |
+| `POST /api/user/conversations/title` | 生效时先剥标签再让 AI 总结标题（否则标题里会出现 `[温柔]`） |
+
+另有两处**不经过 HTTP 接口**的剥离：每日记忆汇总（`lib/daily-memory.js`）在捞昨天消息后剥，
+`/api/pet`、`/api/stickers` 之类与朗读无关的接口不涉及。
+
+**生效条件**：`tts.enabled` + `tts.styleTags !== false` + `provider` 含 `mimo`，三者同时满足。
+⚠️ 这套逻辑只在**接口类型含 `mimo`** 时生效。线上已于 2026-10-03 切到小米 MiMo（`mimo-chat`），
+所以它是真在跑：`/api/chat` 注入标签指令、`/api/tts/config` 告诉前端"要剥、按哪份词表剥"、
+用户看到的气泡是剥过的文字，而 `/api/tts` 拿到的仍是带标签的原文。
+换回 `openai-compatible` 则自动变成"不生成 + 仍旧剥"（历史标签不会再冒出来）。
+
+---
+
+## 附：数据库表（18 张）
 
 | 表 | 说明 |
 |---|---|
 | `admin_users` | 管理员：bcrypt 密码哈希 + TOTP 密钥 + 失败计数与锁定时间 |
 | `admin_sessions` | 后台会话：只存 `sha256(token)`，被拖库也无法直接登录 |
-| `settings` | 分组配置，`name` + `value`(JSON)：`ai` / `tts` / `smtp` / `login` / `site` / `admin` / `users` |
+| `settings` | 分组配置，`name` + `value`(JSON)：`ai` / `tts` / `smtp` / `login` / `site` / `admin` / `users` / `pet` / `sticker` |
 | `audit_logs` | 审计日志：登录、改配置、查看明文密码等敏感操作 |
 | `email_codes` | 邮箱验证码 |
 | `users` | 用户：邮箱/账号唯一，密码为可逆加密（后台可查看），头像等图片存 base64 |
@@ -327,5 +400,10 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 | `conversations` | 对话，支持置顶 |
 | `messages` | 消息 |
 | `diaries` | 日记，含 AI 情绪标签 `mood` |
+| `pet_images` | 桌宠形象库（可放多张；当前用哪张存在 `settings.pet.activeImageId`） |
+| `pet_moods` | 桌宠情绪选项（`mood_key` 唯一且**建好不可改**；动画 / 停留时长 / 是否低垂 / 排序 / 启停） |
+| `pet_lines` | 桌宠回复话术（挂在情绪下，一条情绪可挂多句） |
+| `sticker_categories` | 表情包分类（= 情绪）：`cat_key`（情绪键）/ `sticker_key`（素材目录名 = 标记名）/ 词表 / 优先级 / 深夜放宽 / 是否可触发 |
+| `stickers` | 表情包素材（分类目录里的图，含启停与排序） |
 
 **索引**：`messages(conversation_id, created_at)`、`messages(user_id)`、`conversations(user_id, created_at)`、`diaries(user_id, created_at)`、`user_sessions(user_id)`、`email_codes(email, purpose)`、`users.email` / `users.account`（唯一）。

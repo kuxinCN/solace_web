@@ -17,7 +17,7 @@
  */
 import { getGroup } from "@/lib/settings";
 import { BASE_SCORE, resolveLevel } from "@/lib/stress-analyzer";
-import { getStressState } from "@/lib/stress-state";
+import { getStressState, hasRealStressData, recentScores, calcTrend } from "@/lib/stress-state";
 import { buildPopupPayload, checkPopupTrigger, normalizeLevels } from "@/lib/stress-trigger";
 import { getCurrentUser } from "@/lib/user-auth";
 import { json, jsonError } from "@/lib/util";
@@ -47,32 +47,46 @@ export async function GET(request) {
   const levels = normalizeLevels(config);
   const state = await getStressState(user.id);
 
-  const score = Number(state.combined_score ?? BASE_SCORE);
-  const level = resolveLevel(score, levels);
+  // ⚠️ 新用户（没聊过天、没做过测评）的 stress 行是惰性创建的占位默认值 50，
+  //    那不是真实压力 —— 界面应该显示"暂无数据"，而不是一个假的读数。
+  //    （老用户有真实分析痕迹时照常返回分数。）
+  const hasData = hasRealStressData(state);
+  const score = hasData ? Number(state.combined_score ?? BASE_SCORE) : null;
+  const level = hasData ? resolveLevel(score, levels) : null;
 
-  // 复查：当前分够高、条件都满足 → 给一个待弹窗
+  // 复查：当前分够高、条件都满足 → 给一个待弹窗（没有真实数据就不复查）
   let pendingPopup = null;
   let blockedReason = "";
   let threshold = 0;
 
   try {
-    const decision = await checkPopupTrigger(user.id, score, "chat");
-    threshold = Number(decision.threshold) || 0;
-    blockedReason = decision.allow ? "" : String(decision.reason || "");
+    if (hasData) {
+      const decision = await checkPopupTrigger(user.id, score, "chat");
+      threshold = Number(decision.threshold) || 0;
+      blockedReason = decision.allow ? "" : String(decision.reason || "");
 
-    if (decision.allow) {
-      pendingPopup = buildPopupPayload({ score, source: "chat", levels, config });
+      if (decision.allow) {
+        pendingPopup = buildPopupPayload({ score, source: "chat", levels, config });
+      }
+    } else {
+      blockedReason = "还没有真实的压力数据（没聊过天 / 没做过测评）";
     }
   } catch (err) {
     blockedReason = `复查失败：${err?.message || err}`;
   }
 
+  // 最近的变化：最近 12 次压力读数（来自 stress_logs）+ 趋势（近 3 次均值 − 近 10 次均值）。
+  // ⚠️ 之前接口漏了这两个字段，前端柱状图/趋势文案永远显示空态 —— 这里补上。
+  const historyRows = await recentScores(user.id, 12).catch(() => []);
+  const trend = calcTrend(historyRows.map((row) => Number(row.smoothed_score ?? row.score)));
+
   return json({
     ok: true,
     enabled: true,
+    hasData,
     score,
-    chatScore: Number(state.chat_score ?? BASE_SCORE),
-    diaryScore: Number(state.diary_score ?? BASE_SCORE),
+    chatScore: hasData ? Number(state.chat_score ?? BASE_SCORE) : null,
+    diaryScore: hasData ? Number(state.diary_score ?? BASE_SCORE) : null,
     level,
     levels,
     threshold,
@@ -85,6 +99,14 @@ export async function GET(request) {
       butterfly: config?.relaxOfferButterfly !== false,
     },
     pendingPopup,
+
+    // ---- 最近的变化（迷你趋势图用）----
+    history: historyRows.map((row) => ({
+      score: Number(row.smoothed_score ?? row.score ?? BASE_SCORE),
+      source: row.source,
+      createdAt: row.created_at,
+    })),
+    trend,
 
     // ---- 排查用：为什么现在没弹 ----
     diagnostics: {
