@@ -14,6 +14,7 @@ import { describeDbError, execute, query } from "@/lib/db";
 import { decryptText, encryptText, usingDefaultKey } from "@/lib/secret-box";
 import { ensureUserColumnsOnce } from "@/lib/schema";
 import { getGroup } from "@/lib/settings";
+import { invalidateUserSessionCache } from "@/lib/user-auth";
 import {
   cleanString,
   clientIp,
@@ -46,8 +47,32 @@ function parsePortrait(value) {
   }
 }
 
+function formatDateTime(val) {
+  if (!val) return null;
+  if (val instanceof Date && !isNaN(val.getTime())) {
+    const pad = (n) => String(n).padStart(2, "0");
+    const y = val.getFullYear();
+    const m = pad(val.getMonth() + 1);
+    const d = pad(val.getDate());
+    const h = pad(val.getHours());
+    const mi = pad(val.getMinutes());
+    const s = pad(val.getSeconds());
+    return `${y}-${m}-${d} ${h}:${mi}:${s}`;
+  }
+  if (typeof val === "string") {
+    if (val.includes("T")) {
+      const d = new Date(val);
+      if (!isNaN(d.getTime())) return formatDateTime(d);
+    }
+    return val.replace(/\.\d+Z?$/, "");
+  }
+  return String(val);
+}
+
 function shapeUser(row, revealPassword) {
   const {
+    created_at,
+    last_login_at,
     password_enc: passwordEnc,
     portrait,
     portrait_version: portraitVersion,
@@ -59,6 +84,8 @@ function shapeUser(row, revealPassword) {
 
   return {
     ...rest,
+    created_at: formatDateTime(created_at),
+    last_login_at: formatDateTime(last_login_at),
     status: Number(rest.status) === 1 ? 1 : 0,
     hasPassword,
     // 只有 revealPassword=1 时才带明文；解不出来（密钥变过）时 passwordReadable 为 false
@@ -275,6 +302,9 @@ export async function PATCH(request) {
       const exists = await query("SELECT id FROM users WHERE id = ? LIMIT 1", [id]);
       if (!exists.length) return jsonError("用户不存在", 404);
     }
+
+    // 禁用 / 改资料都要让该用户的会话缓存立刻失效（尤其是 status = 0 的封禁）
+    invalidateUserSessionCache(id);
 
     await logAudit({
       adminId: admin.adminId,

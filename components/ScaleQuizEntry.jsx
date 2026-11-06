@@ -266,7 +266,7 @@ export default function ScaleQuizEntry({ className = "" }) {
               </button>
             </div>
 
-            <ScaleQuiz initialScaleId={activeId} onSubmitted={bump} />
+            <ScaleQuiz initialScaleId={activeId} onClose={() => setOpen(false)} onSubmitted={bump} />
           </div>
         </div>
       ) : null}

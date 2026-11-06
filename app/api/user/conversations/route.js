@@ -24,13 +24,8 @@ export async function GET(request) {
   if (!user) return jsonError("请先登录", 401);
 
   try {
-    // 老部署升级时自动补列（pinned / pinned_at / last_message_at）。
-    // 补列失败不能拖垮接口，否则连会话列表都打不开。
-    try {
-      await ensureUserColumnsOnce();
-    } catch {
-      /* 忽略 */
-    }
+    // 优化：老部署升级时自动补列转为后台异步兜底，绝不阻塞前端会话列表的高频查询
+    void ensureUserColumnsOnce().catch(() => {});
 
     const conversations = await query(
       `SELECT id, user_id, title, pinned, pinned_at, created_at, last_message_at

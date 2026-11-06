@@ -48,3 +48,15 @@ next-env.d.ts
 .env
 .env.*
 !.env.example
+
+# 比赛内部私有技术报告与演示脚本（团队答辩专用，不对外公开）
+docs/TECH-REPORT.*
+docs/*.pdf
+*.pdf
+docs/VIDEO-SCRIPT.md
+scripts/generate-pdf.js
+scratch/
+
+
+# 交接给外部（GPT 等）的项目上下文文档：体积大、含整份源码，不进仓库
+handoff_to_gpt.md

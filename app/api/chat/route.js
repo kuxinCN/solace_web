@@ -13,7 +13,7 @@
 import { requestChat, chatCompletionsUrl, prewarmConnections } from "@/lib/ai";
 import { SAFE_MODE_INSTRUCTION, checkUserContent, ensureHotline } from "@/lib/content-guard";
 import { SUSPECT_INSTRUCTION, recordSuspected, takeRiskTag } from "@/lib/suspected-store";
-import { execute, query } from "@/lib/db";
+import { execute } from "@/lib/db";
 import { withTiming } from "@/lib/perf";
 import { buildStyleBlock } from "@/lib/portrait";
 import { extractMemoryMarkers, stripMemoryMarkers } from "@/lib/memory-marker";
@@ -21,13 +21,16 @@ import { buildTtsTagInstruction, isStyleTagsEnabled, stripTagsFromMessages, tagW
 import {
   buildMemoryMessage,
   loadMemoryCandidates,
+  markMemoriesAccessed,
   saveMemory,
   selectMemoryRows,
 } from "@/lib/memory-store";
 import { getPortrait } from "@/lib/portrait-store";
+import { recordInjection } from "@/lib/memory-metrics";
 import { recordAiUsage } from "@/lib/usage";
 import { rateLimit } from "@/lib/rate-limit";
-import { getGroup } from "@/lib/settings";
+import { getGroup, DEFAULTS } from "@/lib/settings";
+import { buildFullSystemPrompt } from "@/lib/prompt-builder";
 import { getCurrentUser } from "@/lib/user-auth";
 import { decideSticker, stripStickerMarkers } from "@/lib/sticker-engine";
 import { clientIp } from "@/lib/util";
@@ -42,6 +45,16 @@ const IP_RATE_LIMIT = { limit: 120, windowMs: 60 * 1000 };
 const MAX_MESSAGES = 60;
 const MAX_CONTENT_CHARS = 8000;
 const FALLBACK_REPLY = "我暂时无法回应，请稍后再试。";
+
+/**
+ * 长期记忆标记规则：让模型在回复末尾输出 `[MEMORY:一句话]`。
+ *
+ * ⚠️ 后台配置的 systemPrompt 会覆盖前端 SYSTEM_PROMPT，而默认提示词里没有这段，
+ *    所以必须在服务端兜底追加（见下方 systemBlock 拼接处）。
+ * ⚠️ 文案与前端 SYSTEM_PROMPT 保持一致，改一处记得同步另一处。
+ */
+const MEMORY_MARKER_RULE =
+  "当用户说出长期稳定的个人信息、偏好、愿望或重要事实时，在回复末尾单独一行输出标记 [MEMORY:一句话事实]。务必完整保留关键专有名词、宠物名字、姓名、称呼与核心细节（例如用户提到'我养了只小猫叫TZW'必须输出[MEMORY:用户养了一只叫TZW的小猫]，绝对不可遗漏名字）。只记真实说过的，不编造；日常寒暄不需要记。";
 
 /**
  * 日记上下文默认模板（后台 settings 的 diaryPrompt 可覆盖）。
@@ -67,7 +80,7 @@ const DEFAULT_DIARY_TEMPLATE = [
  * ⚠️ 记忆的去重写入（saveMemory）与相关性精选（selectMemoryRows / buildMemoryMessage）
  *    统一在 lib/memory-store.js，本文件只负责"并行发查询 + 超时兜底 + 拼进 systemBlock"。
  */
-function withMemoryTimeout(promise, ms = 800) {
+function withMemoryTimeout(promise, ms = 500) {
   return Promise.race([
     promise,
     new Promise((resolve) => setTimeout(() => resolve({ facts: [], daily: [] }), ms)),
@@ -87,6 +100,105 @@ function envFallbackConfig() {
     maxTokens: 1024,
     timeoutSeconds: 60,
   };
+}
+
+/**
+ * 根据后台配置（client / server）与客户端时钟构造时空背景 System 指令。
+ */
+function buildTimeContext({ config, clientTime }) {
+  const timeSource = String(config?.timeSource || "client").toLowerCase();
+  let dateObj = new Date();
+  let sourceDesc = "服务器系统时间";
+
+  if (timeSource === "client" && clientTime) {
+    const ts = Number(clientTime.timestamp || clientTime.now);
+    if (Number.isFinite(ts) && ts > 1577836800000 && ts < 2524608000000) {
+      dateObj = new Date(ts);
+      sourceDesc = "用户设备本地时间";
+    }
+  }
+
+  let timeZone = "Asia/Shanghai";
+  if (timeSource === "client" && typeof clientTime?.timeZone === "string" && clientTime.timeZone.trim()) {
+    try {
+      Intl.DateTimeFormat(undefined, { timeZone: clientTime.timeZone });
+      timeZone = clientTime.timeZone;
+    } catch {
+      timeZone = "Asia/Shanghai";
+    }
+  }
+
+  let dateStr = "";
+  let timeStr = "";
+  let weekdayStr = "";
+  let hour = dateObj.getHours();
+
+  try {
+    const dtf = new Intl.DateTimeFormat("zh-CN", {
+      timeZone,
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      weekday: "long",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+    const parts = dtf.formatToParts(dateObj);
+    const p = {};
+    for (const item of parts) {
+      p[item.type] = item.value;
+    }
+    const mVal = String(p.month || "").replace(/月/g, "");
+    dateStr = `${p.year}年${mVal}月${p.day}日`;
+    timeStr = `${p.hour}:${p.minute}:${p.second}`;
+    weekdayStr = p.weekday;
+    hour = Number.parseInt(p.hour, 10) || hour;
+  } catch {
+    const y = dateObj.getFullYear();
+    const m = dateObj.getMonth() + 1;
+    const d = dateObj.getDate();
+    const hh = String(dateObj.getHours()).padStart(2, "0");
+    const mm = String(dateObj.getMinutes()).padStart(2, "0");
+    const ss = String(dateObj.getSeconds()).padStart(2, "0");
+    dateStr = `${y}年${m}月${d}日`;
+    timeStr = `${hh}:${mm}:${ss}`;
+    const days = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
+    weekdayStr = days[dateObj.getDay()];
+  }
+
+  let period = "白天";
+  let greetingTip = "";
+  if (hour >= 0 && hour < 5) {
+    period = "深夜/凌晨";
+    greetingTip = "夜深了，用户可能还在熬夜。如果用户提起作息或时间，自然提醒注意休息";
+  } else if (hour >= 5 && hour < 9) {
+    period = "清晨/早晨";
+    greetingTip = "新的一天开始了，元气满满的早晨";
+  } else if (hour >= 9 && hour < 12) {
+    period = "上午";
+    greetingTip = "学习或工作时间，注意适时休息和喝水";
+  } else if (hour >= 12 && hour < 14) {
+    period = "中午/午间";
+    greetingTip = "午餐与小憩时间";
+  } else if (hour >= 14 && hour < 18) {
+    period = "下午";
+    greetingTip = "下午时光，劳逸结合";
+  } else if (hour >= 18 && hour < 20) {
+    period = "傍晚/黄昏";
+    greetingTip = "下班放学时段，晚餐与放松";
+  } else {
+    period = "夜晚";
+    greetingTip = "夜晚的独处陪伴时光";
+  }
+
+  return `【当前现实时空背景】
+- 当前时间：${dateStr} ${timeStr}
+- 星期：${weekdayStr}
+- 时段感知：${period}（${greetingTip}）
+- 时钟基准：${sourceDesc}（时区：${timeZone}）
+- 现实感知规则：你具备真实的现实时间与时区感知。当用户询问“现在几点”、“今天周几”、“今天几号”、“是不是很晚了”或聊起时间与作息时，必须基于上述准确时间作答与关怀，绝不要回答“不知道时间”或“没有准数”。在日常对话未被问及时间时，保持自然倾听与陪伴，无需刻意句句报时。`;
 }
 
 function normalizeMessages(raw) {
@@ -130,11 +242,25 @@ async function handleChat(request) {
 
   const wantStream = payload?.stream === true;
 
-  // 长期记忆候选（事实池 100 条 + 日报 2 条）与 AI 配置互不依赖，并行发出：
+  // 入参归一化是纯本地操作（过滤 + 截断），提到最前面：
+  // 内容安全检测只依赖"本轮用户原话"，提前发出去就能和记忆 / 画像 / 配置**并行**跑，
+  // 不必串在"记忆读完 → 安全检测 → 开流"这条链上（白搭一次往返）。
+  const incoming = normalizeMessages(payload?.messages);
+  const rawLastUser = [...incoming].reverse().find((item) => item.role === "user");
+  // 纯正则匹配 + 一次 safety 配置读取（getGroup 自带 30 秒缓存），与下面几个查询并行
+  const safetyPromise = checkUserContent(rawLastUser?.content || "");
+
+  // 长期记忆候选（事实池 200 条 + 日报 2 条）与 AI 配置互不依赖，并行发出：
   // 两者各需一次远端查询，串行会给首字延迟叠加一次往返（实测单次 0.5~1.5 秒）。
   // 本轮用户消息要等 normalize 之后才有，所以这里只发"查询"，
   // 相关性精选（纯 JS）放到拼 systemBlock 时做，不把查询拖成串行。
   const memoryCandidatesPromise = loadMemoryCandidates(user.id);
+  // 心理画像也是纯 DB 查询 + 本地映射：和记忆、配置一起**并行**发出去，
+  // 不再串在"配置读完 → 画像 → 朗读标签 → 记忆"这条链上（每次多 0.5~1.5 秒）。
+  const portraitPromise = getPortrait(user.id).catch((err) => {
+    console.warn("[portrait] 读画像失败，本次只用全局人格提示词：", err?.message || err);
+    return null;
+  });
 
   let config = null;
   // 朗读标签要不要注入取决于 TTS 分组的两个字段（接口类型 + 开关），
@@ -163,7 +289,6 @@ async function handleChat(request) {
   // 组装最终发给 AI 的消息：
   //   * 系统提示词优先用后台配置的（后台改完保存就生效，不用重启）；后台没配才用前端传来的
   //   * 读日记时，把日记正文按后台配置的模板拼进去（模板里的 {diary} 会被替换成正文）
-  const incoming = normalizeMessages(payload?.messages);
   const frontEndSystem = incoming.filter((item) => item.role === "system");
   // ⚠️ 回喂给模型的历史要先剥掉朗读标签：
   //    模型看到自己上一轮的 `[温柔]` 会越贴越多，而且标签对"读上下文"没有信息量。
@@ -175,18 +300,9 @@ async function handleChat(request) {
     historyTagWords
   );
 
-  // 按用户选择的 AI 人格取提示词：male / female 各一份，都没选就用默认那份。
-  // persona 来自会话查询（lib/user-auth.js 里一并取出），不用再单独查一次数据库。
+  // 按用户选择的 AI 人格组装提示词：采用「性别人设模块 + 公共底座规则」模块化拼接
   const persona = String(user.aiPersona || "").trim().toLowerCase();
-
-  const personaPrompt =
-    persona === "male"
-      ? String(config.systemPromptMale || "").trim()
-      : persona === "female"
-        ? String(config.systemPromptFemale || "").trim()
-        : "";
-
-  const configuredSystem = personaPrompt || String(config.systemPrompt || "").trim();
+  const configuredSystem = buildFullSystemPrompt({ config, persona });
 
   // system 消息统一收集，最后再与对话拼接。顺序至关重要：
   //   人格提示词 → 长期记忆 → 日记正文（紧贴用户消息）
@@ -199,6 +315,26 @@ async function handleChat(request) {
     systemBlock.push(...frontEndSystem);
   }
 
+  // ---- 现实时空背景与时间感知 ----
+  const timeContextBlock = buildTimeContext({ config, clientTime: payload?.clientTime });
+  if (timeContextBlock) {
+    systemBlock.push({ role: "system", content: timeContextBlock });
+  }
+
+  // ---- 长期记忆标记规则（[MEMORY:]）----
+  //
+  // ⚠️ 必须在这里补：后台配置的 systemPrompt **优先于**前端传来的 SYSTEM_PROMPT，
+  //    而默认提示词（lib/settings.js）里并没有 [MEMORY:] 规则 ——
+  //    只靠前端那份的话，线上永远输出不了标记，通道②等于死锁。
+  // ⚠️ 用 includes 判重：前端 SYSTEM_PROMPT 已含这段时不再重复追加，
+  //    避免同一条指令在 system 里出现两次（模型会过度标记）。
+  if (systemBlock[0] && !String(systemBlock[0].content || "").includes("[MEMORY:")) {
+    systemBlock[0] = {
+      role: "system",
+      content: `${systemBlock[0].content}\n\n${MEMORY_MARKER_RULE}`,
+    };
+  }
+
   // ---- 心理画像 → 聊天风格指令 ----
   //
   // ⚠️ **纯本地字符串映射，不调用任何 AI**（规则见 lib/portrait.js）。
@@ -208,7 +344,7 @@ async function handleChat(request) {
   // ⚠️ 取不到画像（新用户没做任何测评）时**一条都不加**，不报错、不降级：
   //    行为和加这个功能之前完全一样。
   try {
-    const stored = await getPortrait(user.id);
+    const stored = await portraitPromise;
     const styleBlock = buildStyleBlock(stored?.portrait);
     if (styleBlock) systemBlock.push({ role: "system", content: styleBlock });
   } catch (err) {
@@ -230,17 +366,39 @@ async function handleChat(request) {
   if (ttsTagBlock) systemBlock.push({ role: "system", content: ttsTagBlock });
 
   // 长期记忆：放在人格提示词之后，为空则不插入。
-  // 候选池（事实 100 + 日报 2）已并行取回，这里按"本轮最后一条用户消息"
-  // 做 bigram 相关性精选 + 分层（daily ≤2 / 相关事实 ≤14 / 无关时只留 6 条最近），
+  // 候选池（事实 200 + 日报 2）已并行取回，这里按"最近 3 条用户消息"做 bigram
+  // 相关性精选 + 分层（daily ≤2 / 相关事实 ≤14 / 无关时只留 6 条最近）+ 关系/偏好常驻 ≤4，
   // 最相关的行排在记忆块最后（紧贴用户消息，GLM 对靠前 system 注意力弱）。
-  // 800 字总上限和 800ms 查询超时两条硬兜底保持不变。
-  const memoryQueryText =
-    [...dialogue].reverse().find((item) => item.role === "user")?.content || "";
+  // 500 字总上限（lib/memory-store.js 的 MEMORY_TOTAL_CHARS）
+  // 和 500ms 查询超时两条硬兜底保持不变。
+  // 跨对话检索：只用"最后一条消息"时，像"今天又加班到十点"这种没带关键实体的话
+  // 往往匹配不到任何记忆；把最近 3 条用户消息拼起来做相关性打分，命中率明显更高。
+  // ⚠️ 只取用户的话：AI 的回复会复述记忆内容，拼进去等于让记忆"自己证明自己相关"。
+  const memoryQueryText = dialogue
+    .filter((item) => item.role === "user")
+    .slice(-3)
+    .map((item) => String(item.content || ""))
+    .join("\n");
   const memoryCandidates = await withMemoryTimeout(memoryCandidatesPromise);
-  const memoryMessage = buildMemoryMessage(
-    selectMemoryRows(memoryCandidates, memoryQueryText)
-  );
+  const memoryRows = selectMemoryRows(memoryCandidates, memoryQueryText);
+  const memoryMessage = buildMemoryMessage(memoryRows);
   if (memoryMessage) systemBlock.push(memoryMessage);
+
+  // 唤醒：被选中的记忆这轮真正进了提示词 → 强度立刻恢复 100、时间刷新到现在。
+  // ⚠️ **不 await**：它只是一条 UPDATE，压在主链路上等于白等一次数据库往返。
+  // ⚠️ 用选中的行（而不是"库里的全部"）：只有真被想起来的记忆才该续命。
+  if (memoryRows.length) {
+    void markMemoriesAccessed(
+      user.id,
+      memoryRows.map((row) => row.id)
+    ).catch((err) => console.warn("[chat] 记忆唤醒失败：", err?.message || err));
+  }
+  // 观测指标：异步累加（按用户 × 天），失败静默，绝不拖慢首字
+  try {
+    recordInjection(user.id, memoryRows.length, memoryMessage?.content?.length || 0);
+  } catch {
+    /* 统计失败不影响聊天 */
+  }
 
   // 日记正文：作为最后一条 system 消息，与本轮用户消息直接相邻，确保模型一定读到
   if (typeof payload?.diaryContext === "string" && payload.diaryContext.trim()) {
@@ -262,7 +420,10 @@ async function handleChat(request) {
   //    "安全模式"要往 systemBlock 里追加指令，而 messages 一旦拼好就加不进去了。
   // ⚠️ 命中只记录"类别 + 规则名"，**不把用户原话写进数据库或日志**。
   const lastUserMessage = [...dialogue].reverse().find((item) => item.role === "user");
-  const safety = await checkUserContent(lastUserMessage?.content || "");
+  // 检测在请求一进来就发起（与记忆 / 画像 / 配置并行），这里只是取结果
+  const safety = await safetyPromise;
+
+
 
   /* ---- ① 紧迫危机：截断，不给 AI 自由发挥的余地 ---- */
   if (safety.blocked) {
@@ -353,6 +514,19 @@ async function handleChat(request) {
   }
 
   const messages = [...systemBlock, ...dialogue];
+
+  // 诊断：System Prompt 体积分块打点。首字变慢最常见的元凶就是它悄悄膨胀 ——
+  // 记一条日志（只有长度，不含内容），排查时一眼能看出是哪块在涨。
+  try {
+    const systemChars = systemBlock.reduce((n, item) => n + String(item.content || "").length, 0);
+    const historyChars = dialogue.reduce((n, item) => n + String(item.content || "").length, 0);
+    const blocks = systemBlock.map((item) => String(item.content || "").length).join("/");
+    console.log(
+      `[chat] prompt: total=${systemChars + historyChars} system=${systemChars} (blocks=${blocks}) history=${historyChars} messages=${messages.length}`
+    );
+  } catch {
+    /* 日志失败不影响聊天 */
+  }
 
   // ---- 压力评估（本地规则，几毫秒）----
   //
@@ -482,13 +656,27 @@ async function handleChat(request) {
     async start(controller) {
       const encoder = new TextEncoder();
 
+      // ⚠️ 立即向前端写入首个 SSE 注释行：
+      //    1. 让前端立即收到 HTTP 200 响应头与首字节，彻底打破 Nginx 反代 60 秒的连接空闲超时；
+      //    2. 配合 X-Accel-Buffering: no 穿透反向代理缓冲。
+      try {
+        controller.enqueue(encoder.encode(": solace-stream-init\n\n"));
+      } catch {
+        /* 忽略客户端早期断开 */
+      }
+
+      // 心跳保活定时器：模型思考或等待排队期间，每 5 秒推一次注释行保活
+      const keepAliveTimer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          clearInterval(keepAliveTimer);
+        }
+      }, 5000);
+
       // ⚠️ 累积这一轮 AI 的完整回复 —— 流结束后要用它做**输出侧兜底**
       //    （安全模式下没提到热线就补一句，见下面 `sendDone()` 之前那段）
       let fullText = "";
-
-      // ⚠️ **开头的字先攒着不发**：模型有时把 `[RISK:*]` 写在**开头**（指令要求写最后，
-      //    但它不一定照做）。一旦发出去流式就收不回来了，标记会一直挂在气泡里 ——
-      //    用户实际踩过这个。所以前 40 个字先扣住，攒够了再决定发什么。
       let headFlushed = false;
 
       const send = (obj) => {
@@ -499,6 +687,7 @@ async function handleChat(request) {
         }
       };
       const sendDone = () => {
+        clearInterval(keepAliveTimer);
         try {
           controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         } catch {
@@ -507,105 +696,119 @@ async function handleChat(request) {
       };
 
       try {
-        const upstream = await fetch(chatCompletionsUrl(baseUrl), {
-          method: "POST",
-          signal:
-            typeof AbortSignal?.timeout === "function"
-              ? AbortSignal.timeout(timeoutMs)
-              : undefined,
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${config.apiKey}`,
-          },
-          body: JSON.stringify({
-            model: config.model,
-            messages,
-            temperature: Number(config.temperature) || 0.7,
-            max_tokens: Number(config.maxTokens) || 1024,
-            stream: true,
-          }),
-        });
+        let upstream = null;
+        let upstreamFailed = false;
+        let failDetail = "";
 
-        if (!upstream.ok || !upstream.body) {
-          // ⚠️ 上游失败的原因必须写进服务端日志：前端只看到兜底文案，排查全靠这里
-          let detail = "";
-          try {
-            detail = await upstream.text();
-          } catch {
-            detail = "(读取上游响应体失败)";
+        try {
+          upstream = await fetch(chatCompletionsUrl(baseUrl), {
+            method: "POST",
+            signal:
+              typeof AbortSignal?.timeout === "function"
+                ? AbortSignal.timeout(timeoutMs)
+                : undefined,
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${config.apiKey}`,
+            },
+            body: JSON.stringify({
+              model: config.model,
+              messages,
+              temperature: Number(config.temperature) || 0.7,
+              max_tokens: Number(config.maxTokens) || 1024,
+              stream: true,
+            }),
+          });
+
+          if (!upstream.ok || !upstream.body) {
+            upstreamFailed = true;
+            try {
+              failDetail = await upstream.text();
+            } catch {
+              failDetail = "(读取响应体失败)";
+            }
+            console.warn(
+              `[chat] 上游流式请求返回 ${upstream.status}，尝试自动降级为非流式重试：`,
+              String(failDetail).slice(0, 300)
+            );
           }
-          console.error(
-            `[chat] 上游返回 ${upstream.status} ${upstream.statusText || ""}：`,
-            String(detail).slice(0, 500)
-          );
-          // ⚠️ **AI 挂了也必须有热线** —— 同非流式那条路径的道理：
-          //    上游 503 不该成为"风险场景下不给热线"的理由。
-          send({ error: safeMode ? ensureHotline(FALLBACK_REPLY) : FALLBACK_REPLY });
-          sendDone();
-          return;
+        } catch (streamFetchErr) {
+          upstreamFailed = true;
+          console.warn("[chat] 上游流式连接失败，尝试自动降级为非流式重试：", streamFetchErr?.message || streamFetchErr);
         }
 
-        const reader = upstream.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
+        // ================= 智能降级双保险（Fallback to Non-Stream） =================
+        // 如果上游模型不支持 stream: true（部分第三方聚合平台限制）或流式握手失败，
+        // 自动用非流式 requestChat 重试，再转为 SSE 下发，100% 避免前台报网络波动。
+        if (upstreamFailed) {
+          const fallbackRes = await requestChat({ messages, config });
+          if (fallbackRes.ok && fallbackRes.reply) {
+            fullText = fallbackRes.reply;
+            const cleanText = takeRiskTag(fullText).text;
+            send({ delta: cleanText });
+          } else {
+            console.error(`[chat] 非流式降级重试依然失败：`, fallbackRes.error || failDetail);
+            send({ error: safeMode ? ensureHotline(FALLBACK_REPLY) : FALLBACK_REPLY });
+            sendDone();
+            return;
+          }
+        } else {
+          // 正常的上游流式读取
+          const reader = upstream.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
 
-        while (true) {
-          const { done: finished, value } = await reader.read();
-          if (finished) break;
+          while (true) {
+            const { done: finished, value } = await reader.read();
+            if (finished) break;
 
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || ""; // 保留最后一段不完整的行
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || ""; // 保留最后一段不完整的行
 
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data:")) continue;
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (!trimmed.startsWith("data:")) continue;
 
-            const data = trimmed.slice(5).trim();
-            if (!data || data === "[DONE]") continue;
+              const data = trimmed.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
 
-            try {
-              const parsed = JSON.parse(data);
-              const delta = parsed?.choices?.[0]?.delta?.content;
-              if (delta) {
-                fullText += delta;
+              try {
+                const parsed = JSON.parse(data);
+                // ⚠️ 严格只读取正式回复 content，坚决忽略模型的内部思维链（reasoning_content / thinking）
+                const delta = parsed?.choices?.[0]?.delta?.content;
+                if (delta) {
+                  fullText += delta;
 
-                // ⚠️ **安全模式下，前 40 个字先扣着不发** ——
-                //    模型有时把 `[RISK:*]` 写在**开头**（指令要求写最后，但它不一定照做），
-                //    而流式一旦发出去就收不回来了，标记会一直挂在气泡里（用户实际踩过）。
-                //    攒够 40 字再决定：有标记就摘掉，没有就原样发。
-                // ⚠️ 只有安全模式才走这条 —— 正常聊天不该让用户等那 40 个字。
-                if (safeMode && !headFlushed) {
-                  if (fullText.length < 40) continue;
-                  headFlushed = true;
-                  const head = takeRiskTag(fullText);
-                  send({ delta: head.found ? head.text : fullText });
-                  continue;
+                  if (safeMode && !headFlushed) {
+                    if (fullText.length < 40) continue;
+                    headFlushed = true;
+                    const head = takeRiskTag(fullText);
+                    send({ delta: head.found ? head.text : fullText });
+                    continue;
+                  }
+
+                  // 过滤可能内嵌在 content 里的 <think> 标签碎片
+                  if (!fullText.includes('<think>')) {
+                    send({ delta });
+                  }
                 }
-
-                send({ delta });
+              } catch {
+                /* 忽略单行解析错误 */
               }
-            } catch {
-              /* 忽略单行解析错误 */
             }
           }
         }
 
-        // ⚠️ **输出侧兜底** —— 只在安全模式下生效。**热线是底线，这段不能删。**
-        //
-        //    为什么要放在这里：`SAFE_MODE_INSTRUCTION` 只是"要求"，模型可能不照做
-        //    （回复短的时候尤其容易把"引导专业帮助"那半句吞掉）。
-        //    风险场景下不该赌模型的自觉。
-        //
-        //    ⚠️ 补的时候把"多出来的那段"当普通 delta 发出去 ——
-        //       前端那边就是继续往气泡里追加，不需要任何新逻辑。
-        if (safeMode) {
-          // ⚠️ 疑似的先看 AI 有没有"翻案"：**只有它明确写了 `[RISK:no]`** 才算日常表达
-          const verdict = isSuspect ? takeRiskTag(fullText) : { text: fullText, noRisk: false };
+        // ⚠️ 彻底剥离任何可能出现在正文里的 <think>...</think> 思考链标签
+        if (fullText.includes('<think>')) {
+          fullText = fullText.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/<think>[\s\S]*/gi, '').trimStart();
+          send({ replace: fullText });
+        }
 
-          // ⚠️ 流式下 `[RISK:*]` 已经一个字一个字发出去了，这里**没法"收回"** ——
-          //    所以额外发一条 `replace`：前端如果认得，就把气泡内容整体换成干净版（标记就消失了）；
-          //    不认得也不要紧，只是末尾多一行标记 —— **关键的判定逻辑不受影响**。
+        // ⚠️ **输出侧兜底** —— 只在安全模式下生效。
+        if (safeMode) {
+          const verdict = isSuspect ? takeRiskTag(fullText) : { text: fullText, noRisk: false };
           if (verdict.found) {
             send({ replace: verdict.text });
           }
@@ -619,19 +822,11 @@ async function handleChat(request) {
         }
 
         // ---------------- 模型自主决策记忆（[MEMORY:xxx]） ----------------
-        //
-        // 在安全兜底**之后**、sendDone 之前解析：只影响"要不要记"，绝不等流式收尾。
-        //   * 从累积的完整回复里摘标记（最多取最后一条）；
-        //   * 气泡整体换成"剥掉 RISK + MEMORY 标记"的干净版（前端认得 replace 就生效）；
-        //   * 安全模式下保证热线仍在（ensureHotline 只追加不覆盖）；
-        //   * 写库 fire-and-forget，任何失败只打日志。
         const memoryMarkers = extractMemoryMarkers(fullText);
-        // 模型私自写的贴纸标记也要整体替换掉（流式期间可能短暂露出过，replace 收回）
         const hasStickerMark = /\[sticker:[a-z0-9]+\]/i.test(fullText);
         if (memoryMarkers.length || hasStickerMark) {
           const cleanBase = takeRiskTag(fullText).text;
           let clean = stripMemoryMarkers(cleanBase);
-          // 贴纸唯一合法来源是下面的节流引擎 sticker 事件，不允许模型自己"夹带"
           clean = stripStickerMarkers(clean);
           if (safeMode) clean = ensureHotline(clean);
           send({ replace: clean });
@@ -640,7 +835,6 @@ async function handleChat(request) {
             const marker = memoryMarkers[memoryMarkers.length - 1];
             void (async () => {
               try {
-                // 走统一写入口：与关键词通道近似去重，重复提及只强化不新增
                 await saveMemory(user.id, marker, "self");
               } catch (err) {
                 console.warn("[chat] 自主记忆写入失败：", err?.message || err);
@@ -650,22 +844,22 @@ async function handleChat(request) {
         }
 
         // ---------------- 情绪贴纸（节流引擎） ----------------
-        //
-        // 决策在主对话流开始时就并行发起了（关键词毫秒判 / AI 兜底 2.5s 超时），
-        // 这里只是取结果；达标才发一条独立 SSE 事件，前端把它贴在消息末尾，
-        // 不插入任何文字、不影响已结束的文字流。
-        const sticker = await stickerDecisionPromise;
+        const sticker = await Promise.race([
+          stickerDecisionPromise,
+          new Promise((resolve) => setTimeout(() => resolve(null), 400)),
+        ]);
         if (sticker?.category) {
           send({ sticker: sticker.category });
         }
 
         sendDone();
       } catch (err) {
+        clearInterval(keepAliveTimer);
         console.error("[chat] 调用上游失败：", err?.message || err);
-        // ⚠️ 走到这里说明连流都没建立起来 —— 同样不能漏掉热线
         send({ error: safeMode ? ensureHotline(FALLBACK_REPLY) : FALLBACK_REPLY });
         sendDone();
       } finally {
+        clearInterval(keepAliveTimer);
         try {
           controller.close();
         } catch {
@@ -680,6 +874,7 @@ async function handleChat(request) {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }

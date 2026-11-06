@@ -28,7 +28,7 @@ import {
   normalizeCategoryInput,
   parseKeywords,
 } from "@/lib/sticker-store";
-import { cleanString, clientIp, json, jsonError, readJsonBody } from "@/lib/util";
+import { clientIp, json, jsonError, readJsonBody } from "@/lib/util";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

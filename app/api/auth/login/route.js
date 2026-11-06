@@ -3,7 +3,7 @@
  * 密码在库里是 lib/secret-box.js 的可逆加密，这里解密后做定长比较。
  * 被管理员禁用的账号（status=0）不能登录。
  */
-import { describeDbError, query } from "@/lib/db";
+import { describeDbError, execute, query } from "@/lib/db";
 import { rateLimit } from "@/lib/rate-limit";
 import { decryptText } from "@/lib/secret-box";
 import {
@@ -70,6 +70,12 @@ export async function POST(request) {
       userAgent: request.headers.get("user-agent") || "",
     });
     await cleanupExpiredUserSessions();
+    try {
+      await execute("UPDATE users SET last_login_at = ? WHERE id = ?", [
+        toMysqlDateTime(new Date()),
+        user.id,
+      ]);
+    } catch {}
 
     return json(
       {

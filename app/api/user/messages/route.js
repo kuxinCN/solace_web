@@ -1,3 +1,5 @@
+import { decryptContent, encryptText } from "@/lib/secret-box";
+import { indexMessage } from "@/lib/searchable-encryption";
 /** 聊天消息：按会话读取 / 追加一条 / 删除一条（「重新生成」会用到删除） */
 import { describeDbError, execute, query } from "@/lib/db";
 import { ensureUserColumnsOnce } from "@/lib/schema";
@@ -38,10 +40,6 @@ export async function GET(request) {
   if (!conversationId) return jsonError("缺少会话 id", 400);
 
   try {
-    if (!(await ownsConversation(conversationId, user.id))) {
-      return jsonError("会话不存在", 404);
-    }
-
     const recent = await query(
       `SELECT id, conversation_id, user_id, role, content, created_at
          FROM messages
@@ -50,9 +48,22 @@ export async function GET(request) {
         LIMIT ${MAX_ROWS}`,
       [conversationId, user.id]
     );
-    // 倒序取完翻回正序，前端渲染逻辑不用改
-    const messages = recent.reverse();
-    return json({ ok: true, messages, limited: recent.length >= MAX_ROWS });
+
+    // 优化：有消息时必然属于该用户且会话存在，直接返回，省掉一次远程数据库 ownsConversation 往返 (300~500ms)
+    if (recent.length > 0) {
+      recent.forEach((m) => {
+        m.content = decryptContent(m.content);
+      });
+      const messages = recent.reverse();
+      return json({ ok: true, messages, limited: recent.length >= MAX_ROWS });
+    }
+
+    // 只有条数为 0 时，才查会话表区分是"空会话"还是"会话不存在/无权访问"
+    if (!(await ownsConversation(conversationId, user.id))) {
+      return jsonError("会话不存在", 404);
+    }
+
+    return json({ ok: true, messages: [], limited: false });
   } catch (err) {
     return jsonError(describeDbError(err), 500);
   }
@@ -88,10 +99,11 @@ export async function POST(request) {
       return jsonError("会话不存在", 404);
     }
 
+    const cipherContent = encryptText(content);
     const result = await execute(
       `INSERT INTO messages (conversation_id, user_id, role, content, created_at)
        VALUES (?, ?, ?, ?, ?)`,
-      [conversationId, user.id, role, content, createdAt]
+      [conversationId, user.id, role, cipherContent, createdAt]
     );
 
     // 同步更新对话活动时间 = 本条消息时间。

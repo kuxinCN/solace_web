@@ -1,18 +1,14 @@
 /**
- * 后台「拉取可用模型列表」：GET /api/admin/ai/models?baseUrl=&apiKey=
+ * 后台「拉取可用模型列表」：
+ *   GET  /api/admin/ai/models?baseUrl=&apiKey=
+ *   POST /api/admin/ai/models  body: { baseUrl, apiKey }
  *
- * OpenAI 协议里有一个标准接口 `GET {baseUrl}/models`，会返回该 Key 可用的模型列表。
- * 有了它，管理员不用去翻文档抄模型名，点一下就能选。
- *
- * ⚠️ 不是每家服务商都实现了 /models（有的会返回 404 或空列表），
- * 所以这里失败时**照样返回 HTTP 200**，只是 ok:false + 空数组，
- * 前端据此提示"该服务商不支持自动获取，请手动输入模型名"。
- *
- * 参数（都可选）：不传就用后台已保存的配置。
+ * 优先按照前端当前输入框传入的 baseUrl 和 apiKey 向服务商请求模型列表，
+ * 未传或留空时回退已保存的配置。避免修改配置后必须先点保存的割裂体验。
  */
 import { getAdminFromRequest } from "@/lib/admin-auth";
 import { getGroup } from "@/lib/settings";
-import { cleanString, json, jsonError } from "@/lib/util";
+import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,18 +20,12 @@ function modelsUrl(baseUrl) {
   const base = String(baseUrl || "")
     .trim()
     .replace(/\/+$/, "")
-    // 用户可能把完整对话地址粘进来了，这里先还原成版本目录
     .replace(/\/chat\/completions$/i, "");
   if (!base) return "";
   return `${base}/models`;
 }
 
-export async function GET(request) {
-  const admin = await getAdminFromRequest(request);
-  if (!admin) return jsonError("请先登录后台", 401);
-
-  const params = new URL(request.url).searchParams;
-
+async function handleFetchModels(reqBaseUrl, reqApiKey) {
   let saved = null;
   try {
     saved = await getGroup("ai");
@@ -43,11 +33,11 @@ export async function GET(request) {
     saved = null;
   }
 
-  const baseUrl = cleanString(params.get("baseUrl"), 500) || String(saved?.baseUrl || "").trim();
-  const apiKey = cleanString(params.get("apiKey"), 500) || String(saved?.apiKey || "").trim();
+  const baseUrl = cleanString(reqBaseUrl, 500) || String(saved?.baseUrl || "").trim();
+  const apiKey = cleanString(reqApiKey, 500) || String(saved?.apiKey || "").trim();
 
-  if (!baseUrl) return jsonError("请先填「接口地址」", 400);
-  if (!apiKey) return jsonError("请先填「API Key」", 400);
+  if (!baseUrl) return jsonError("请先填写「接口地址」", 400);
+  if (!apiKey) return jsonError("请先填写「API Key」", 400);
 
   const url = modelsUrl(baseUrl);
   const startedAt = Date.now();
@@ -84,8 +74,6 @@ export async function GET(request) {
       });
     }
 
-    // 标准格式是 { data: [{ id: "gpt-4o-mini", ... }] }；
-    // 也兼容 { models: [...] } 或直接给数组的情况
     const list = Array.isArray(data)
       ? data
       : Array.isArray(data?.data)
@@ -99,7 +87,6 @@ export async function GET(request) {
       .filter((id) => typeof id === "string" && id.trim())
       .map((id) => id.trim());
 
-    // 去重并按字母排序，方便在后台下拉里找
     const unique = [...new Set(models)].sort();
 
     return json({
@@ -122,7 +109,23 @@ export async function GET(request) {
       latencyMs,
       url,
       error: message,
-      hint: "连不上上游：检查服务器出网是否被防火墙限制；也可以直接手动输入模型名",
+      hint: "连不上上游：检查网络地址是否正确，或直接手动输入模型名",
     });
   }
+}
+
+export async function GET(request) {
+  const admin = await getAdminFromRequest(request);
+  if (!admin) return jsonError("请先登录后台", 401);
+
+  const params = new URL(request.url).searchParams;
+  return handleFetchModels(params.get("baseUrl"), params.get("apiKey"));
+}
+
+export async function POST(request) {
+  const admin = await getAdminFromRequest(request);
+  if (!admin) return jsonError("请先登录后台", 401);
+
+  const body = await readJsonBody(request).catch(() => ({}));
+  return handleFetchModels(body?.baseUrl, body?.apiKey);
 }

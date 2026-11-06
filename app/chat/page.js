@@ -1,12 +1,21 @@
 "use client";
 
 import { memo, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import HealingCottage from "@/components/HealingCottage";
-import ConfirmModal from "@/components/ConfirmModal";
 import ProfileView from "@/components/ProfileView";
-import TrashModal from "@/components/TrashModal";
-import DeleteChoiceModal from "@/components/DeleteChoiceModal";
-import { readMessageCache, removeMessageCache, writeMessageCache } from "@/lib/message-cache";
+import ChatModals from "@/components/chat/ChatModals";
+import {
+  findCachedMessages,
+  getLastActiveConversation,
+  readConversationsCache,
+  readMessageCache,
+  removeMessageCache,
+  setLastActiveConversation,
+  writeConversationsCache,
+  writeMessageCache,
+  clearAllLocalChatState,
+} from "@/lib/message-cache";
 import {
   dropOpenBracketTail,
   hasOpenBracketTail,
@@ -15,15 +24,13 @@ import {
   tagWordsFrom,
 } from "@/lib/tts-tags";
 import MoodPicker, { MoodBadge } from "@/components/MoodPicker";
-import BioModal from "@/components/BioModal";
-import AboutModal from "@/components/AboutModal";
-import FavoritesModal from "@/components/FavoritesModal";
-import MemoriesModal from "@/components/MemoriesModal";
-import ImageCropper from "@/components/ImageCropper";
-import StressMeter from "@/components/StressMeter";
-import RelaxPopup from "@/components/RelaxPopup";
-import ButterflyEffect from "@/components/ButterflyEffect";
+import WarmCompanion from "@/components/WarmCompanion";
+import Sidebar, { friendlyTimeLabel, snippetAround } from "@/components/chat/Sidebar";
+import ChatView from "@/components/chat/ChatView";
+import DiaryTab, { formatDateCN } from "@/components/chat/DiaryTab";
 import { useAvatarUpload, currentImageWriteSeq, markLocalImageWrite, mergeLocalImageWrites } from "@/lib/use-avatar-upload";
+
+
 
 // 统一的数据请求封装：所有后端 REST 调用都走这里
 async function apiRequest(path, options = {}) {
@@ -46,30 +53,89 @@ async function apiRequest(path, options = {}) {
   return data || {};
 }
 
+/**
+ * 流式渲染节流：SSE 每几十毫秒就来一段 delta，逐个 setState 会让整条消息列表重渲染，
+ * 中文长回复时肉眼可见地卡。攒到一个间隔（默认 60ms ≈ 16 帧/秒）再刷一次。
+ *
+ * ⚠️ 流结束、整段替换（replace / error）必须走 flush：否则最后一段还留在缓冲里，
+ *    气泡会"少一截"，而且界面显示和落库文本会对不上。
+ */
+function createDeltaThrottle(render, ms = 60) {
+  let timer = null;
+  let lastAt = 0;
+  let latest = "";
+  const paint = () => {
+    timer = null;
+    lastAt = Date.now();
+    render(latest);
+  };
+  return {
+    push(text) {
+      latest = text;
+      const wait = ms - (Date.now() - lastAt);
+      if (wait <= 0) {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        paint();
+      } else if (!timer) {
+        timer = setTimeout(paint, wait);
+      }
+    },
+    flush(text) {
+      if (typeof text === "string") latest = text;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      paint();
+    },
+  };
+}
+
 const btnBase =
-  "border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 rounded-lg hover:bg-[#e8eff2] hover:text-slate-900 active:bg-[#dbe6ea] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed";
+  "border border-[#ebe3dc] dark:border-[#38302A] bg-white/90 dark:bg-[#251F1C] text-slate-700 dark:text-[#F5DCD3] rounded-xl hover:bg-[#FAF7F4] dark:hover:bg-[#322923] hover:text-slate-900 dark:hover:text-[#FFF5F0] hover:border-[#dfd5cd] dark:hover:border-[#4B3C34] active:bg-[#f5ebe4] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs";
 
 const inputClass =
-  "w-full border border-[#d5d9d7] bg-white p-2 text-sm text-gray-800 placeholder-gray-400 rounded-lg transition-colors duration-150 focus:outline-none focus:border-[#8fb3c7] focus:ring-1 focus:ring-[#8fb3c7]";
+  "w-full border border-[#ebe3dc] dark:border-[#38302A] bg-white/95 dark:bg-[#221D1A] px-3.5 py-2.5 text-sm text-slate-800 dark:text-[#F5DCD3] placeholder-slate-400 dark:placeholder-[#7D6E66] rounded-xl transition-all duration-150 focus:outline-none focus:border-[#e2a68c] focus:ring-2 focus:ring-[#e2a68c]/20 shadow-2xs";
 
 // 搜索框：圆角 + 左侧留出放大镜图标的位置
 const searchInputClass =
-  "w-full border border-[#d5d9d7] bg-white py-2 pl-9 pr-3 text-sm text-gray-800 placeholder-gray-400 rounded-full transition-colors duration-150 focus:outline-none focus:border-[#8fb3c7] focus:ring-1 focus:ring-[#8fb3c7]";
+  "w-full border border-[#ebe3dc] dark:border-[#38302A] bg-white/95 dark:bg-[#221D1A] py-2 pl-9 pr-3 text-sm text-slate-800 dark:text-[#F5DCD3] placeholder-slate-400 dark:placeholder-[#7D6E66] rounded-full transition-all duration-150 focus:outline-none focus:border-[#e2a68c] focus:ring-2 focus:ring-[#e2a68c]/20 shadow-2xs";
 
-// 日记情绪标签暖色系（与治愈小屋名言卡 #C98BA4 同族）：
-// 背景为极浅同色，文字为同色相加深（对比度 ≥4:1），border 同系收边
-const MOOD_COLORS = {
-  轻快: "bg-[#fdf2e4] text-[#b5763a] border-[#f5e3cc]",
-  平静: "bg-[#f7eff4] text-[#9c6b8c] border-[#ecdcea]",
-  安稳: "bg-[#f5efe6] text-[#8f7350] border-[#e9dfcd]",
-  有点沉: "bg-[#f0ecf4] text-[#8d7f9b] border-[#e2dbeb]",
-  疲惫: "bg-[#f3ede7] text-[#96785f] border-[#e7dcd0]",
-  烦躁: "bg-[#fdeae6] text-[#bb6353] border-[#f8d5cd]",
-  孤单: "bg-[#f4ecf4] text-[#8f6f92] border-[#e9d9e9]",
-  说不清: "bg-[#f5f0ed] text-[#96877f] border-[#e9e1db]",
-};
-// 未匹配到的情绪（AI 可能生成词典外描述）→ 名言卡暖粉兜底
-const MOOD_COLOR_DEFAULT = "bg-[#fdf1f4] text-[#a87c8e] border-[#f6e2e9]";
+// ── 生日判断 ───────────────────────────────────────────────
+// ⚠️ 只比"月 / 日"，不比年份 —— 生日每年过一次，库里存的是出生那一年。
+// ⚠️ 库里 birthday 允许 `YYYY-MM`（只有年月，后台可能只填到月）：
+//    没有"日"就判断不了生日，宁可跳过也不要瞎猜成 1 号。
+function parseBirthdayMD(value) {
+  const m = /^(\d{4})-(\d{1,2})(?:-(\d{1,2}))?/.exec(String(value || "").trim());
+  if (!m || !m[3]) return null;
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  if (!Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { month, day };
+}
+
+function todayMD() {
+  const d = new Date();
+  return { year: d.getFullYear(), month: d.getMonth() + 1, day: d.getDate() };
+}
+
+function isBirthdayToday(value) {
+  const b = parseBirthdayMD(value);
+  if (!b) return false;
+  const t = todayMD();
+  return b.month === t.month && b.day === t.day;
+}
+
+// 防重复：键里带「用户 id + 年月日」——
+// 带日期是为了"同一天只祝福一次"；带年份顺带保证明年还会触发；带用户 id 防止换账号串号
+function birthdayGreetKey(userId) {
+  const t = todayMD();
+  return `has_greeted_birthday_${userId || "anon"}_${t.year}-${t.month}-${t.day}`;
+}
 
 // AI 人设：完全共情、倾听优先的情绪陪伴者
 const SYSTEM_PROMPT = `你是一个安静的陪伴者，也是一个会笑的朋友。
@@ -122,8 +188,9 @@ const SYSTEM_PROMPT = `你是一个安静的陪伴者，也是一个会笑的朋
 直接说话，不写"总结"之类的开头结尾。
 
 你记得他之前随口说过的事。
-当用户说出**长期稳定**的个人信息、偏好或重要事实时，
-在回复末尾单独一行输出标记 [MEMORY:一句话]。
+当用户说出**长期稳定**的个人信息、偏好、愿望或重要事实时，
+在回复末尾单独一行输出标记 [MEMORY:一句话事实]。
+务必完整保留关键专有名词、宠物名字、姓名、称呼与核心细节（例如“我养了只小猫叫TZW”必须输出[MEMORY:用户养了一只叫TZW的小猫]，不可遗漏名字）。
 只记真实说过的，不编造，不每条都记；日常寒暄、当下情绪不需要记。
 
 先感受他，再回应他。
@@ -139,6 +206,32 @@ const SYSTEM_PROMPT = `你是一个安静的陪伴者，也是一个会笑的朋
 // 消息缓存约束：最多缓存 20 个对话（LRU），超过 5 分钟视为过期、下次点开重新拉取
 const MESSAGES_CACHE_MAX = 20;
 const MESSAGES_CACHE_TTL = 5 * 60 * 1000;
+
+// ── 长期记忆批量提炼的"闸门" ─────────────────────────────
+// 一次请求带最近 8 条对话；触发条件是「距上次 ≥10 分钟」或「又攒了 5 条用户消息」。
+// 存 localStorage：刷新 / 切对话都不会让节奏失效（后端冷却也按 userId 统一算）。
+const MEMORY_EXTRACT_WINDOW = 8; // 每次带最近几条消息
+const MEMORY_EXTRACT_GAP_MS = 2 * 60 * 1000; // 最短间隔放宽到 2 分钟
+const MEMORY_EXTRACT_SENT = 2; // 或攒够 2 条用户消息就提炼一次（大幅提升灵敏度）
+
+function readMemoryGate(userId) {
+  try {
+    const raw = localStorage.getItem(`memory_extract_gate_${userId || "anon"}`);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return { ts: Number(parsed?.ts) || 0, sent: Number(parsed?.sent) || 0 };
+  } catch {
+    return { ts: 0, sent: 0 };
+  }
+}
+
+function writeMemoryGate(userId, state) {
+  try {
+    localStorage.setItem(
+      `memory_extract_gate_${userId || "anon"}`,
+      JSON.stringify({ ts: Number(state?.ts) || 0, sent: Number(state?.sent) || 0 })
+    );
+  } catch {}
+}
 
 // 把 AI 回复按 \n 切成多个短消息段，过滤空段；用于"真人连发短消息"效果
 function splitAiSegments(content) {
@@ -170,6 +263,7 @@ const STICKER_MAP = {
 const STICKER_LINE_RE = /^\s*\[sticker:\s*([a-zA-Z]+)\s*\]?\s*$/;
 // 完整标记：用于取出分类 / 兜底剥离夹在文字里的标记
 const STICKER_MARK_RE = /\[sticker:\s*([a-zA-Z]+)\s*\]/;
+
 
 /**
  * 剥离 AI 回复里的表情包标记：
@@ -203,6 +297,18 @@ function parseStickerMark(content) {
 // 流式 TTS 分句参数
 const SENT_MIN = 4; // 短于 4 个字的句子先与下一句合并，避免碎片语音
 const SENT_MAX = 60; // 无标点超过 60 字强制切分，避免长句等太久
+
+// 高频习惯用语词表（首句 0ms 秒播优化池）
+const FAST_WARM_PHRASES = [
+  "我在呢",
+  "我在的",
+  "想听你说说",
+  "慢慢来，不急",
+  "我在听呢",
+  "放轻松，有我在",
+];
+const warmAudioCache = new Map(); // 纯净文本(无标点) -> Blob
+let warmAudioPreloading = false;
 // 首句快速通道（降低"发送→出声"延迟）：第一个句子不必等句号。
 // EAGER_SOFT=6：累积到 6 字遇逗号即切（逗号前至少 3 字，听感仍自然）；
 // EAGER_HARD=9：到 9 字仍无逗号时硬切兜底（SYSTEM_PROMPT 要求多逗号，极少触发）。
@@ -239,7 +345,16 @@ function drainSentences(pending, flush, eager = false) {
   // 首句快速通道：一句完整标点都还没切出来时，9 字遇逗号即切 / 15 字硬切。
   // 在逗号（含逗号）处切，TTS 朗读带自然停顿；硬切只在长句无逗号时兜底。
   if (eager && sentences.length === 0 && !flush && remaining) {
-    if (remaining.length >= EAGER_SOFT) {
+    // 0ms 秒播优化：优先检测是否以高频习惯用语开头（命中则直接快速切出，0秒起播）
+    const matchedPhrase = FAST_WARM_PHRASES.find((p) => remaining.startsWith(p));
+    if (matchedPhrase) {
+      let cutLen = matchedPhrase.length;
+      if (remaining[cutLen] && /[，,。！？!?~、]/.test(remaining[cutLen])) {
+        cutLen += 1;
+      }
+      sentences.push(remaining.slice(0, cutLen));
+      remaining = remaining.slice(cutLen);
+    } else if (remaining.length >= EAGER_SOFT) {
       const scanWin = remaining.slice(0, EAGER_HARD);
       const commaIdx = scanWin.lastIndexOf("，");
       if (commaIdx >= EAGER_SOFT - 3) {
@@ -281,1228 +396,30 @@ function drainSentences(pending, flush, eager = false) {
   return { sentences, rest: flush ? "" : remaining };
 }
 
-// 对话活动时间（last_message_at）的友好标签：
-// 今天 / 昨天 / X天前 / 具体日期（今年 M/D，跨年 YYYY/M/D）。
-// 侧边栏行内时间与分组标题共用，保证两处口径一致。
-function friendlyTimeLabel(dateStr) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "";
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  const diffDays = Math.round((today - that) / 86400000);
-  if (diffDays <= 0) return "今天";
-  if (diffDays === 1) return "昨天";
-  if (diffDays <= 6) return `${diffDays}天前`;
-  return d.getFullYear() === now.getFullYear()
-    ? `${d.getMonth() + 1}/${d.getDate()}`
-    : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
-}
-
-// 截取命中关键词附近的一小段文字，用于搜索结果预览
-function snippetAround(content, keyword) {
-  const text = content || "";
-  const idx = text.toLowerCase().indexOf(keyword);
-  if (idx < 0) return text.slice(0, 30);
-  const start = Math.max(0, idx - 8);
-  const end = Math.min(text.length, idx + keyword.length + 20);
-  return (start > 0 ? "…" : "") + text.slice(start, end);
-}
-
-// 日期格式化为 "2026年9月18日"
-function formatDateCN(dateStr) {
-  if (!dateStr) return "";
-  const d = new Date(dateStr);
-  if (isNaN(d.getTime())) return "";
-  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
-}
-
-
-// dataURL 转 Blob（上传聊天背景 / AI 头像用）
-function dataUrlToBlob(dataUrl) {
-  const [meta, base64] = dataUrl.split(",");
-  const mime = meta.match(/:(.*?);/)[1];
-  const bin = atob(base64);
-  const arr = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-  return new Blob([arr], { type: mime });
-}
-
-// AI 头像：优先用户自定义（profiles.ai_avatar_url），否则默认渐变圆形
-function AiAvatar({ url }) {
-  if (url) {
-    return (
-      <img
-        src={url}
-        alt="AI"
-        className="w-8 h-8 shrink-0 rounded-full object-cover"
-      />
-    );
-  }
-  return (
-    <div className="w-8 h-8 shrink-0 rounded-full bg-gradient-to-br from-[#a9c6da] to-[#c3b4d6] flex items-center justify-center text-white text-sm font-bold">
-      S
-    </div>
-  );
-}
-
-function UserAvatar({ url, name }) {
-  if (url) {
-    return (
-      <img
-        src={url}
-        alt="我"
-        className="w-8 h-8 shrink-0 rounded-full object-cover"
-      />
-    );
-  }
-  return (
-    <div className="w-8 h-8 shrink-0 rounded-full bg-gradient-to-br from-[#b6cdd9] to-[#9db5c3] flex items-center justify-center text-white text-sm font-bold">
-      {(name || "我").charAt(0).toUpperCase()}
-    </div>
-  );
-}
-
-/**
- * 单条消息气泡（memo 化）：只有与该气泡画面相关的数据变化时才重渲。
- * 侧边栏切换对话、以及流式输出时的高频 setMessages 都不会再让整列气泡重渲。
- * 按钮回调经 handlers（ref，引用恒定）透传，保证调用的始终是最新闭包。
- */
-const MessageRow = memo(
-  function MessageRow({
-    m,
-    isUser,
-    ttsTagWords,
-    holdTagPartial,
-    renderKey,
-    revealed,
-    stickerSrc,
-    highlighted,
-    aiBubbleBg,
-    aiAvatarUrl,
-    userAvatarUrl,
-    displayName,
-    regenId,
-    sending,
-    ttsPlayingId,
-    ttsPlayingCk,
-    ttsLoadingId,
-    handlers,
-    messageRefs,
-  }) {
-    // AI 消息按 \n 切成多段，模拟真人连发短消息（表情包标记行不算文字）
-    // ⚠️ 朗读标签在这里剥掉：库里存的是**带标签的原文**（TTS 要靠它控语气），
-    //    但屏幕上不能出现 `[温柔]` 这种东西。用户消息一律不动 —— 用户自己打的括号是内容。
-    //    holdTagPartial：正在流式输出的那条要挡住"开了口还没闭合"的半截标签。
-    const rawText = parseStickerMark(m.content).text;
-    const segments = isUser
-      ? []
-      : splitAiSegments(
-          ttsTagWords ? stripTtsTags(rawText, ttsTagWords, { holdPartial: holdTagPartial }) : rawText
-        );
-    // 已完成分段 + 正在输入的分段（如果 revealed 还没到末尾）
-    const visibleCount = Math.min(revealed + 1, segments.length);
-    const showSegments = segments.slice(0, visibleCount);
-    return (
-      <div
-        ref={(el) => {
-          messageRefs.current[m.id] = el;
-        }}
-        className={`flex items-start gap-2 mb-3 group ${
-          isUser ? "justify-end" : "justify-start"
-        }`}
-      >
-        {!isUser && <AiAvatar url={aiAvatarUrl} />}
-        <div
-          className={`flex flex-col max-w-[70%] ${
-            isUser ? "items-end" : "items-start"
-          }`}
-        >
-          {/* 用户消息：单气泡 */}
-          {isUser && (
-            <div
-              className={`msg-in max-w-full px-3 py-2 text-sm leading-6 whitespace-pre-wrap break-words rounded-2xl transition-shadow duration-300 bg-[#6d99b5] text-white rounded-br-md ${highlighted ? "ring-2 ring-[#8fb3c7]" : ""}`}
-            >
-              {m.content}
-            </div>
-          )}
-
-          {/* AI 消息：按分段渲染多个气泡 */}
-          {!isUser && showSegments.length === 0 && !m.content && (m.id === regenId || String(m.id).startsWith("temp-")) && (
-            // 空临时气泡 / 重新生成中：显示思考点点
-            <div className={`msg-in ${aiBubbleBg} px-3 py-2 rounded-2xl rounded-bl-md flex gap-1`}>
-              {[0, 150, 300].map((delay) => (
-                <span
-                  key={delay}
-                  className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                  style={{ animationDelay: `${delay}ms` }}
-                />
-              ))}
-            </div>
-          )}
-
-          {!isUser && showSegments.map((seg, i) => (
-            <div
-              key={`${renderKey}-${i}`}
-              className={`msg-in max-w-full px-3 py-2 text-sm leading-6 break-words rounded-2xl ${aiBubbleBg} text-slate-800 rounded-bl-md ${
-                i < showSegments.length - 1 ? "mb-1" : ""
-              } shadow-sm ${highlighted ? "ring-2 ring-[#8fb3c7]" : ""}`}
-            >
-              {seg}
-            </div>
-          ))}
-
-          {/* 表情包：贴在 AI 气泡下方，不加底色、固定小尺寸，避免视觉突兀 */}
-          {!isUser && stickerSrc && (
-            <img
-              src={stickerSrc}
-              alt=""
-              draggable={false}
-              className="mt-1 w-[100px] max-w-[120px] h-auto rounded-2xl select-none"
-            />
-          )}
-
-          {/* 操作区：播放语音 + 重新生成。电脑端悬停才显示，移动端无 hover → 常显 */}
-          {!isUser && !String(m.id).startsWith("temp-") && m.content && (
-            <div className="mt-1 flex items-center gap-1 self-start opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-150">
-              {/* 喇叭按钮：空闲喇叭 / 加载中旋转 / 播放中暂停；点击区 ≥44px */}
-              <button
-                type="button"
-                onClick={() =>
-                  handlers.current.onToggleTts(m.id, parseStickerMark(m.content).text, m.ck)
-                }
-                title={
-                  ttsPlayingId === m.id || ttsPlayingCk === m.ck
-                    ? "暂停"
-                    : "播放语音"
-                }
-                aria-label={
-                  ttsPlayingId === m.id || ttsPlayingCk === m.ck
-                    ? "暂停语音"
-                    : "播放语音"
-                }
-                className="w-11 h-11 sm:w-7 sm:h-7 flex items-center justify-center text-slate-400 hover:text-[#7fa8c4] transition-colors duration-150"
-              >
-                {ttsLoadingId === m.id ? (
-                  <svg
-                    className="w-4 h-4 animate-spin"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                  >
-                    <path d="M21 12a9 9 0 1 1-6.22-8.56" />
-                  </svg>
-                ) : ttsPlayingId === m.id || ttsPlayingCk === m.ck ? (
-                  <svg
-                    className="w-4 h-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <rect x="6" y="4" width="4" height="16" rx="1" />
-                    <rect x="14" y="4" width="4" height="16" rx="1" />
-                  </svg>
-                ) : (
-                  <svg
-                    className="w-4 h-4"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                  </svg>
-                )}
-              </button>
-
-              <button
-                onClick={() => handlers.current.onRegenerate(m.id)}
-                disabled={sending || m.id === regenId}
-                title="重新生成"
-                className="w-11 h-11 sm:w-auto sm:h-auto sm:px-1 flex items-center justify-center gap-1 text-xs text-slate-400 hover:text-[#7fa8c4] transition-colors duration-150 disabled:opacity-50"
-              >
-                <svg
-                  className="w-3.5 h-3.5"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polyline points="23 4 23 10 17 10" />
-                  <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                </svg>
-                <span className="hidden sm:inline">重新生成</span>
-              </button>
-            </div>
-          )}
-        </div>
-        {isUser && <UserAvatar url={userAvatarUrl} name={displayName} />}
-      </div>
-    );
-  },
-  // 只比较"会影响这条气泡画面"的数据；回调与 ref 引用恒定，不参与比较。
-  // m 的对象引用只在它自己被更新时变化，因此这里能准确拦住无关重渲。
-  (a, b) =>
-    a.m === b.m &&
-    a.renderKey === b.renderKey &&
-    a.revealed === b.revealed &&
-    a.stickerSrc === b.stickerSrc &&
-    a.highlighted === b.highlighted &&
-    a.regenId === b.regenId &&
-    a.sending === b.sending &&
-    a.ttsPlayingId === b.ttsPlayingId &&
-    a.ttsPlayingCk === b.ttsPlayingCk &&
-    a.ttsLoadingId === b.ttsLoadingId &&
-    a.aiBubbleBg === b.aiBubbleBg &&
-    a.aiAvatarUrl === b.aiAvatarUrl &&
-    a.userAvatarUrl === b.userAvatarUrl &&
-    a.displayName === b.displayName
-);
-
-// 单条对话行：复选框(多选) / 标题(或重命名输入框) / 摘要 / 时间 / ··· 菜单
-function ConvRow({
-  c,
-  snippet,
-  selected,
-  multi,
-  currentId,
-  renaming,
-  renameValue,
-  menuOpen,
-  onOpen,
-  onToggleSelect,
-  onMenu,
-  onRename,
-  onRenameCommit,
-  onRenameCancel,
-  setRenameValue,
-  onPin,
-  onMultiSelect,
-  onShare,
-  onDelete,
-  closeMenu,
-}) {
-  const timeLabel = friendlyTimeLabel(c.last_message_at || c.created_at);
-
-  return (
-    <div
-      onClick={multi ? onToggleSelect : onOpen}
-      className={`group relative flex items-center gap-1.5 rounded-lg p-2 mb-0.5 cursor-pointer transition-colors duration-150 ${
-        multi && selected
-          ? "bg-[#dbeaf2] text-slate-900"
-          : c.id === currentId
-          ? "bg-[#e3edf2] text-slate-900 font-medium"
-          : "text-slate-700 hover:bg-[#eef1f2]"
-      }`}
-    >
-      {/* 多选复选框 */}
-      {multi && (
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={onToggleSelect}
-          onClick={(e) => e.stopPropagation()}
-          className="w-4 h-4 accent-[#7fa3b8] shrink-0"
-        />
-      )}
-
-      {/* 主体：标题 / 重命名输入框 + 摘要 */}
-      <div className="min-w-0 flex-1">
-        {renaming ? (
-          <input
-            autoFocus
-            value={renameValue}
-            onChange={(e) => setRenameValue(e.target.value)}
-            onClick={(e) => e.stopPropagation()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") onRenameCommit(c.id);
-              if (e.key === "Escape") onRenameCancel();
-            }}
-            className="w-full border border-[#8fb3c7] rounded px-1.5 py-0.5 text-sm bg-white outline-none"
-          />
-        ) : (
-          <p className="truncate text-sm">{c.title}</p>
-        )}
-        {snippet && !renaming && (
-          <p className="text-xs text-slate-400 truncate font-normal">{snippet}</p>
-        )}
-      </div>
-
-      {/* 右侧：时间 + ··· 菜单（多选/重命名时隐藏） */}
-      {!multi && !renaming && (
-        <div className="flex items-center gap-1 shrink-0">
-          {timeLabel && (
-            <span className="text-[10px] text-slate-400">{timeLabel}</span>
-          )}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onMenu();
-            }}
-            title="更多操作"
-            className="text-slate-400 hover:text-slate-700 px-1 rounded transition-colors duration-150"
-          >
-            ⋯
-          </button>
-        </div>
-      )}
-
-      {/* 下拉菜单 */}
-      {menuOpen && !multi && !renaming && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={closeMenu} />
-          <div className="absolute right-0 top-8 z-50 w-32 bg-white rounded-lg shadow-lg border border-[#e8eae7] py-1">
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onRename(c);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-[#eef1f2]"
-            >
-              重命名
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onPin(c.id);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-[#eef1f2]"
-            >
-              {c.pinned ? "取消置顶" : "置顶"}
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onShare(c);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-[#eef1f2]"
-            >
-              分享
-            </button>
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onMultiSelect();
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-slate-700 hover:bg-[#eef1f2]"
-            >
-              多选
-            </button>
-            <div className="my-0.5 border-t border-[#e8eae7]" />
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onDelete(c.id);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-[#c0654a] hover:bg-[#fbeee8]"
-            >
-              删除
-            </button>
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
-// 置顶区 + 时间轴分组布局
-function ConversationGroups({
-  conversations,
-  multiSelectMode,
-  selectedIds,
-  currentId,
-  renamingId,
-  renameValue,
-  menuOpenId,
-  timeGroupLabel,
-  onOpen,
-  onToggleSelect,
-  setMenuOpenId,
-  setRename,
-  onRename,
-  onRenameCommit,
-  onRenameCancel,
-  onPin,
-  onMultiSelect,
-  onShare,
-  onDelete,
-}) {
-  const pinned = conversations
-    .filter((c) => c.pinned)
-    .sort((a, b) => new Date(b.pinned_at || 0) - new Date(a.pinned_at || 0));
-  const unpinned = conversations
-    .filter((c) => !c.pinned)
-    .sort(
-      (a, b) =>
-        new Date(b.last_message_at || b.created_at || 0) -
-        new Date(a.last_message_at || a.created_at || 0)
-    );
-
-  // 按活动时间标签分组
-  const groups = {};
-  for (const c of unpinned) {
-    const label = timeGroupLabel(c.last_message_at || c.created_at);
-    if (!groups[label]) groups[label] = [];
-    groups[label].push(c);
-  }
-
-  const renderRow = (c) => (
-    <ConvRow
-      key={c.id}
-      c={c}
-      snippet=""
-      selected={selectedIds.includes(c.id)}
-      multi={multiSelectMode}
-      currentId={currentId}
-      renaming={renamingId === c.id}
-      renameValue={renameValue}
-      menuOpen={menuOpenId === c.id}
-      onOpen={() => onOpen(c)}
-      onToggleSelect={() => onToggleSelect(c.id)}
-      onMenu={() => setMenuOpenId(menuOpenId === c.id ? null : c.id)}
-      onRename={() => onRename(c)}
-      onRenameCommit={() => onRenameCommit(c.id)}
-      onRenameCancel={onRenameCancel}
-      setRenameValue={setRename}
-      onPin={() => onPin(c.id)}
-      onMultiSelect={onMultiSelect}
-      onShare={() => onShare(c)}
-      onDelete={() => onDelete(c.id)}
-      closeMenu={() => setMenuOpenId(null)}
-    />
-  );
-
-  return (
-    <>
-      {/* 置顶区 */}
-      {pinned.length > 0 && (
-        <div className="mb-1">
-          <p className="text-[11px] text-slate-400 px-2 py-1">置顶</p>
-          {pinned.map(renderRow)}
-          <div className="border-t border-[#e0e3e0] my-1.5 mx-2" />
-        </div>
-      )}
-
-      {/* 时间轴分组 */}
-      {Object.keys(groups).map((label) => (
-        <div key={label} className="mb-1">
-          <p className="text-[11px] text-slate-400 px-2 py-1">{label}</p>
-          {groups[label].map(renderRow)}
-          <div className="border-t border-[#eceee9] my-1 mx-2" />
-        </div>
-      ))}
-    </>
-  );
-}
-
-/* ---------------- 日记编辑区：情绪释放（涂抹）交互 ---------------- */
-
-/**
- * 往哪走：写日记烦躁的时候，按住编辑区反复涂抹 → 文字逐渐模糊变灰
- * （四段视觉分级）→ 累积涂够 1350px（约 9-10 次来回）触发「灰烬飘散」，
- * 每个字独立向上淡出 → 清空输入框，原稿进回收站（3 天内可恢复）。
- *
- * ⚠️ 四个必须守住的点（踩过的坑）：
- *   ① **pointermove 里绝对不能 setState** —— 全部改 ref.current.style，
- *      否则每移动一像素都重渲染，手机卡成幻灯片。
- *   ② **不用 setPointerCapture** —— 会锁死容器，textarea 点不进光标
- *      （悬浮球那边踩过）。用 window 级 pointermove/up。
- *   ③ **20px 以内不算涂抹** —— 否则用户点光标 / 拖选都会触发，
- *      太吓人。
- *   ④ **松手不触发飘散、只暂停** —— 进度存 ref 跨手势保留，
- *      只有 eraseProgress ≥ 100 才真吹走。
- */
-const RELEASE_ARM_PX = 20;      // 首次激活阈值
-const RELEASE_TOTAL_PX = 1350;  // 累计这么多滑动距离才到进度 100（约 9-10 次来回）
-
-/** 进度 → 四段视觉分级（直接给 style 属性） */
-function progressToStyle(p) {
-  let blur, opacity, translateY;
-  if (p < 30) {
-    const t = p / 30;
-    blur = t * 2;              // 0 → 2
-    opacity = 1;
-    translateY = 0;
-  } else if (p < 60) {
-    const t = (p - 30) / 30;
-    blur = 2 + t * 3;          // 2 → 5
-    opacity = 1 - t * 0.15;    // 1 → 0.85
-    translateY = 0;
-  } else if (p < 90) {
-    const t = (p - 60) / 30;
-    blur = 5 + t * 4;          // 5 → 9
-    opacity = 0.85 - t * 0.15; // 0.85 → 0.7
-    translateY = -t * 5;       // 0 → -5
-  } else {
-    const t = (p - 90) / 10;
-    blur = 9 + t * 1;          // 9 → 10
-    opacity = 0.7 - t * 0.2;   // 0.7 → 0.5
-    translateY = -5 - t * 3;   // -5 → -8
-  }
-  return {
-    filter: `blur(${blur.toFixed(2)}px)`,
-    opacity: opacity.toFixed(3),
-    transform: `translateY(${translateY.toFixed(2)}px)`,
-  };
-}
-
-/**
- * 生成字符飘散的独立 keyframe（两段式，Solace 暖色品牌意象）。
- * 第一段 0-0.6s：颜色逐渐变暖（→ #C98BA4），透明度缓慢下降。
- * 第二段 0.6-1.8s：向上飘起 + 随机水平偏移/旋转 + blur(2px) + 透明度归零。
- */
-const CHAR_VARIANTS = 16; // 飘散 keyframe 变体池：随机取用 + 随机延迟，避免逐字符生成 keyframe
-
-/** 预生成 16 个两段式飘散变体（暖色化 → 上浮飘散），注入一次复用 */
-function buildCharVariantKeyframes() {
-  let css = "";
-  for (let i = 0; i < CHAR_VARIANTS; i++) {
-    const dx = ((Math.random() - 0.5) * 60).toFixed(1);   // -30 ~ +30
-    const rot = ((Math.random() - 0.5) * 30).toFixed(1);  // -15 ~ +15deg
-    const lift = (-(60 + Math.random() * 40)).toFixed(1); // -60 ~ -100
-    css += `
-@keyframes diary-release-chv-${i} {
-  0%   { opacity: 1; color: inherit; transform: translate(0,0) rotate(0deg); filter: blur(0); }
-  33%  { opacity: 0.78; color: #C98BA4; transform: translate(0,0) rotate(0deg); filter: blur(0); }
-  100% { opacity: 0; color: #C98BA4; transform: translate(${dx}px, ${lift}px) rotate(${rot}deg); filter: blur(2px); }
-}`;
-  }
-  return css;
-}
-
-const DIARY_RELEASE_BRAND_KEYFRAME = `
-@keyframes diary-release-brand {
-  0%   { opacity: 0; transform: translateY(6px); }
-  60%  { opacity: 1; transform: translateY(0); }
-  80%  { opacity: 1; transform: translateY(0); }
-  100% { opacity: 0; transform: translateY(-4px); }
-}`;
-
-// ── 飘散文本拆分（性能降级）──────────────────────────────
-// ≤150 字逐字；150-400 逐词（中文 2-3 字一组、英文按词）；>400 逐行
-const RELEASE_CHAR_MAX = 150;
-const RELEASE_WORD_MAX = 400;
-const RELEASE_LINE_HARD = 44; // 逐行模式下单行仍超长时按句号切后再硬切的长度
-
-/** 逐词模式：中文 2-3 字一组、英文按空格成词、空白原样保留（保证排版不塌） */
-function releaseWordChunks(str, out) {
-  const re = /\s+|[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*|[\u4e00-\u9fff]|[^A-Za-z0-9\s\u4e00-\u9fff]/g;
-  const cjk = [];
-  const flush = () => {
-    while (cjk.length) {
-      // 剩 3 → 3 个；剩 ≥5 → 3 个；否则 2 个（避免末尾孤字）
-      const n = cjk.length === 3 ? 3 : cjk.length >= 5 ? 3 : 2;
-      out.push({ text: cjk.splice(0, n).join("") });
-    }
-  };
-  let m;
-  while ((m = re.exec(str))) {
-    const tok = m[0];
-    if (/^\s+$/.test(tok)) {
-      flush();
-      out.push({ ws: true, text: tok });
-    } else if (/[\u4e00-\u9fff]/.test(tok)) {
-      cjk.push(tok);
-    } else if (/^[A-Za-z0-9]/.test(tok)) {
-      flush();
-      out.push({ text: tok });
-    } else {
-      // 标点：粘在当前词组末尾，不单独飘
-      if (cjk.length) cjk[cjk.length - 1] += tok;
-      else if (out.length && !out[out.length - 1].ws) out[out.length - 1].text += tok;
-      else out.push({ text: tok });
-    }
-  }
-  flush();
-}
-
-/** 逐行模式：先按换行，再按句读，最后硬切（每块尽量是一整句） */
-function releaseLineChunks(str, out) {
-  const lines = str.split("\n");
-  lines.forEach((line, li) => {
-    if (li > 0) out.push({ ws: true, text: "\n" });
-    if (!line) return;
-    if (line.length <= RELEASE_LINE_HARD) {
-      out.push({ text: line });
-      return;
-    }
-    const segs = line.match(/[^。！？；!?;]+[。！？；!?;]*/g) || [line];
-    for (const s of segs) {
-      for (let i = 0; i < s.length; i += RELEASE_LINE_HARD) {
-        out.push({ text: s.slice(i, i + RELEASE_LINE_HARD) });
-      }
-    }
-  });
-}
-
-/** 按总字数选择拆分粒度，返回 { mode, perNode: [[{ws,text},...], ...] } */
-function releaseBuildChunks(textNodes) {
-  let total = 0;
-  for (const n of textNodes) total += n.nodeValue.length;
-  const mode = total <= RELEASE_CHAR_MAX ? "char" : total <= RELEASE_WORD_MAX ? "word" : "line";
-  const perNode = textNodes.map((n) => {
-    const str = n.nodeValue;
-    const items = [];
-    if (mode === "char") {
-      for (const ch of str) items.push({ text: ch });
-    } else if (mode === "word") {
-      releaseWordChunks(str, items);
-    } else {
-      releaseLineChunks(str, items);
-    }
-    return items;
-  });
-  return { mode, perNode };
-}
-
-
-/** 剥离残留 HTML 标签（<p></p>、<br>、&nbsp; 等）后判断是否为纯空白。
- *  日记输入框本身是纯 textarea/input，这里是防止富文本残留的兜底。 */
-function releaseIsBlank(value) {
-  const text = String(value ?? "")
-    .replace(/<br\s*\/?>/gi, "")
-    .replace(/<[^>]*>/g, "")
-    .replace(/&nbsp;/gi, " ")
-    .replace(/&#160;/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return text === "";
-}
-
-function DiaryReleaseZone({
-  children,
-  hint = "烦躁的时候，按住编辑区任意位置涂抹，让它随风走",
-  onRelease,
-  isEmpty,   // () => boolean：标题+正文是否全空（含空白/残留标签）
-}) {
-  const zoneRef = useRef(null);   // 定位上下文：飘散 clone / 品牌锚点挂这里
-  const wrapRef = useRef(null);   // 整个编辑区（标题+正文+心情+按钮）：涂抹与模糊的作用域
-  const overlayRef = useRef(null);      // 飘散动画 overlay（整区 DOM clone）
-  const progressRef = useRef(0);        // 累积进度 0-100，跨手势保留
-  const gestureRef = useRef({ down: false, armed: false, startX: 0, startY: 0, lastX: 0, lastY: 0 });
-  const cleanupTimerRef = useRef(null);
-  const triggeredRef = useRef(false);    // 是否已触发飘散（防重复）
-  const animStyleRef = useRef(null);    // 飘散动画的 <style> 节点
-
-  // 释放流程轻提示：zone 内部 fixed 全局 Toast（不依赖侧边栏，日记 tab 也可见）
-  const [tipText, setTipText] = useState("");
-  const tipTimerRef = useRef(null);
-  function flashTip(text, ms = 1900) {
-    if (!text) return;
-    setTipText(text);
-    if (tipTimerRef.current) window.clearTimeout(tipTimerRef.current);
-    tipTimerRef.current = window.setTimeout(() => setTipText(""), ms);
-  }
-
-  // props 的 ref 镜像（手势闭包里读最新值）
-  const isEmptyRef = useRef(isEmpty);
-  useEffect(() => { isEmptyRef.current = isEmpty; }, [isEmpty]);
-
-  // 拖动期间才需要 window 监听（一次手势只触发一次 re-render，不是每帧）
-  const [gestureOn, setGestureOn] = useState(false);
-  const onReleaseRef = useRef(onRelease);
-  useEffect(() => {
-    onReleaseRef.current = onRelease;
-  }, [onRelease]);
-
-  /** 卸载：清定时器 + 动态节点 */
-  useEffect(
-    () => () => {
-      if (cleanupTimerRef.current) window.clearTimeout(cleanupTimerRef.current);
-      if (tipTimerRef.current) window.clearTimeout(tipTimerRef.current);
-      animStyleRef.current?.remove();
-      overlayRef.current?.remove();
-    },
-    []
-  );
-
-  /** 飘散前用户继续打字 → 进度归零（DOM input 事件，不走 React 状态） */
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const onInput = () => {
-      if (triggeredRef.current) return;
-      if (progressRef.current > 0) {
-        progressRef.current = 0;
-        clearVisualStyles();
-        askedRef.current = false;
-        confirmedRef.current = false;
-      }
-    };
-    wrap.addEventListener("input", onInput);
-    return () => wrap.removeEventListener("input", onInput);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  function clearVisualStyles() {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    wrap.style.filter = "";
-    wrap.style.opacity = "";
-    wrap.style.transform = "";
-    wrap.style.userSelect = "";
-    wrap.style.visibility = "";
-  }
-
-  function clearOverlay() {
-    if (overlayRef.current) {
-      overlayRef.current.remove();
-      overlayRef.current = null;
-    }
-  }
-
-  /** 触发飘散：整区 DOM clone → 输入框值转文字 → 逐字拆 span 飘走 */
-  function triggerDispersal() {
-    const zone = zoneRef.current;
-    const wrap = wrapRef.current;
-    if (!zone || !wrap) return;
-    triggeredRef.current = true;
-    const rect = wrap.getBoundingClientRect();
-
-    // 原区整体隐藏（等恢复定时器再显示），clone 顶上播放动画
-    wrap.style.visibility = "hidden";
-    wrap.style.pointerEvents = "none";
-
-    // 先清掉可能残留的旧 overlay / 样式
-    clearOverlay();
-    animStyleRef.current?.remove();
-
-    const clone = wrap.cloneNode(true);
-    // 剥掉涂抹期的模糊/透明等内联样式，clone 从干净状态开始飘。
-    // ⚠️ transform 保留 wrap 当前值：第 4 段分级带着 -8px 上浮，
-    //    若清零会让「隐藏→clone 顶上」的衔接处向下跳 8px。
-    Object.assign(clone.style, {
-      filter: "",
-      opacity: "",
-      transform: wrap.style.transform || "",
-      userSelect: "",
-      visibility: "visible",
-      position: "absolute",
-      left: "0",
-      top: "0",
-      margin: "0",
-      width: rect.width + "px",
-      height: rect.height + "px",
-      pointerEvents: "none",
-    });
-    clone.setAttribute("aria-hidden", "true");
-
-    // input/textarea 的值不在 DOM 文本里 → 换成装着 value 的 div，布局样式尽量对齐
-    const liveFields = wrap.querySelectorAll("input, textarea");
-    const cloneFields = clone.querySelectorAll("input, textarea");
-    cloneFields.forEach((cf, i) => {
-      const src = liveFields[i];
-      const div = document.createElement("div");
-      div.textContent = src ? String(src.value ?? "") : "";
-      if (src) {
-        const cs = window.getComputedStyle(src);
-        Object.assign(div.style, {
-          font: cs.font,
-          lineHeight: cs.lineHeight,
-          letterSpacing: cs.letterSpacing,
-          color: cs.color,
-          background: "transparent",
-          padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
-          margin: `${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft}`,
-          borderWidth: cs.borderWidth,
-          borderStyle: "solid",
-          borderColor: "transparent",
-          borderRadius: cs.borderRadius,
-          minHeight: cs.height,
-          width: "100%",
-          boxSizing: "border-box",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
-          overflow: "hidden",
-        });
-      }
-      cf.replaceWith(div);
-    });
-
-    // 按钮（保存/取消等）只剩边框底色会留在原地 → 变透明，只让文字飘
-    clone.querySelectorAll("button").forEach((btn) => {
-      btn.style.background = "transparent";
-      btn.style.borderColor = "transparent";
-      btn.style.boxShadow = "none";
-    });
-
-    // 注入变体 keyframes（一次性复用）
-    const styleEl = document.createElement("style");
-    styleEl.textContent = buildCharVariantKeyframes();
-    document.head.appendChild(styleEl);
-    animStyleRef.current = styleEl;
-
-    // 遍历所有文本节点（元素间纯空白缩进行忽略，文本内部空白保留）
-    const walker = document.createTreeWalker(clone, NodeFilter.SHOW_TEXT, {
-      acceptNode: (n) =>
-        n.nodeValue && n.nodeValue.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT,
-    });
-    const textNodes = [];
-    while (walker.nextNode()) textNodes.push(walker.currentNode);
-
-    // ① 按总字数分档：≤150 逐字 / 150-400 逐词 / >400 逐行
-    const { mode, perNode } = releaseBuildChunks(textNodes);
-    // ② 每个文本节点换成一个「容器 span」，动画片段后续按帧往里填
-    const queue = []; // { container, ws, text, len }，按文档顺序
-    textNodes.forEach((node, i) => {
-      const container = document.createElement("span");
-      container.style.cssText = "display:inline;white-space:pre-wrap;";
-      for (const it of perNode[i]) {
-        queue.push({
-          container,
-          ws: !!it.ws,
-          text: it.text,
-          len: it.text.length,
-        });
-      }
-      node.parentNode.replaceChild(container, node);
-    });
-
-    // 挂到 body（fixed）：编辑态触发后父组件会卸载编辑表单，
-    // clone 挂在 zone 里会被 React 一起清掉，挂 body 才能播完整条动画
-    Object.assign(clone.style, {
-      position: "fixed",
-      left: rect.left + "px",
-      top: rect.top + "px",
-      zIndex: "60",
-    });
-    document.body.appendChild(clone);
-    overlayRef.current = clone;
-
-    // ③ requestAnimationFrame 分批发车：每帧最多启动 20 个字符的动画，
-    //    避免上千个动画同帧触发导致长文本卡顿
-    let qi = 0;
-    let maxEnd = performance.now();
-    const spanWhite = mode === "line" ? "pre-wrap" : "pre";
-    function launchFrame(now) {
-      let budget = 20;
-      while (qi < queue.length && budget > 0) {
-        const job = queue[qi++];
-        if (job.ws) {
-          job.container.appendChild(document.createTextNode(job.text));
-          continue; // 空白不播动画、不占预算
-      }
-        budget -= job.len;
-        const variant = Math.floor(Math.random() * CHAR_VARIANTS);
-        const delay = Math.random() * 300;
-        const span = document.createElement("span");
-        span.textContent = job.text;
-        span.style.cssText =
-          `display:inline-block;white-space:${spanWhite};will-change:transform,opacity;` +
-          `animation:diary-release-chv-${variant} 1800ms cubic-bezier(.2,.7,.2,1) ${delay.toFixed(0)}ms forwards;`;
-        // 动画结束即摘掉 will-change，释放合成层
-        span.addEventListener(
-          "animationend",
-          () => { span.style.willChange = ""; },
-          { once: true }
-        );
-        job.container.appendChild(span);
-        maxEnd = Math.max(maxEnd, now + 1800 + delay);
-      }
-      if (qi < queue.length) {
-        requestAnimationFrame(launchFrame);
-      } else {
-        // 最后一片真实结束时刻 → 进入收尾序列
-        const wait = Math.max(0, maxEnd - performance.now()) + 50;
-        cleanupTimerRef.current = window.setTimeout(finishDispersal, wait);
-      }
-    }
-
-    // 收尾（全程不退出编辑界面）：
-    // ① 清 clone → ② 原地显示「交给 Solace」2.5s → ③ 锚点消失后清空+进回收站 → ④ 恢复可见
-    async function finishDispersal() {
-      clearOverlay();
-      animStyleRef.current?.remove();
-      animStyleRef.current = null;
-
-      // ② 编辑界面正中原地显示品牌锚点（表单仍隐藏，未跳列表）
-      showBrandAnchor(rect);
-
-      // ③ 锚点消失后：清空标题/正文 + 原稿进回收站。新建/编辑走同一个 onRelease 入口。
-      //    onRelease 返回：true/undefined=成功无提示；string=成功/失败提示文案；false/抛错=失败
-      cleanupTimerRef.current = window.setTimeout(async () => {
-        let ret;
-        try {
-          ret = await Promise.resolve(onReleaseRef.current?.());
-        } catch {
-          ret = "操作没完成，请再试一次";
-        }
-        // ④ 恢复界面可见：成功→空白编辑区（编辑模式由父组件在轻提示后自行返回列表）；
-        //    失败→父组件已把原稿放回，恢复显示即可
-        restoreAfterRelease();
-        if (typeof ret === "string") flashTip(ret, 2200);
-      }, 2600);
-    }
-
-    requestAnimationFrame(launchFrame);
-  }
-
-  /** 飘散收尾：进度归零、恢复编辑区可见与可交互（placeholder 自然出现） */
-  function restoreAfterRelease() {
-    progressRef.current = 0;
-    triggeredRef.current = false;
-    askedRef.current = false;
-    confirmedRef.current = false;
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    wrap.style.visibility = "";
-    wrap.style.pointerEvents = "";
-    wrap.style.filter = "";
-    wrap.style.opacity = "";
-    wrap.style.transform = "";
-    wrap.style.userSelect = "";
-  }
-
-  /** 在原编辑区位置显示品牌锚点文字，淡入淡出后自移除。
-   *  挂 body + fixed：编辑态触发飘散后表单会卸载，挂在 zone 里会被一起清掉。 */
-  function showBrandAnchor(rect) {
-    if (!rect) return;
-    const el = document.createElement("div");
-    el.textContent = "交给 Solace吧";
-    Object.assign(el.style, {
-      // fixed 铺满原编辑区矩形，flex 水平垂直居中
-      position: "fixed",
-      left: rect.left + "px",
-      top: rect.top + "px",
-      width: rect.width + "px",
-      height: rect.height + "px",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      textAlign: "center",
-      fontSize: "34px", // 约 text-4xl
-      fontWeight: "600",
-      color: "#C98BA4",
-      letterSpacing: "0.08em",
-      pointerEvents: "none",
-      zIndex: "61",
-      animation: "diary-release-brand 2500ms ease-in-out forwards",
-    });
-    // 注入品牌动画 keyframe（幂等：已存在就不加）
-    if (!document.getElementById("diary-release-brand-style")) {
-      const s = document.createElement("style");
-      s.id = "diary-release-brand-style";
-      s.textContent = DIARY_RELEASE_BRAND_KEYFRAME;
-      document.head.appendChild(s);
-    }
-    document.body.appendChild(el);
-    window.setTimeout(() => el.remove(), 2600);
-  }
-
-  /** 30% 确认弹窗：冻结进度期间不允许继续累积，弹窗关闭后才解锁 */
-  const [askConfirm, setAskConfirm] = useState(false);
-  const askRef = useRef(false);       // askConfirm 的 ref 镜像（手势闭包里读，避免陈旧值）
-  const askedRef = useRef(false);     // 本轮手势是否已弹过窗（防重复弹窗）
-  const confirmedRef = useRef(false); // 已点「确定」→ 保持冻结值，继续涂到满
-
-  /** 取消：弹窗关闭、进度归零、模糊恢复，回到正常编辑 */
-  function handleConfirmCancel() {
-    askRef.current = false;
-    setAskConfirm(false);
-    askedRef.current = false;
-    confirmedRef.current = false;
-    progressRef.current = 0;
-    clearVisualStyles();
-    const wrapEl = wrapRef.current;
-    if (wrapEl) wrapEl.style.userSelect = "";
-  }
-
-  /** 确定：弹窗关闭，进度保持冻结值，用户可继续涂抹累积 */
-  function handleConfirmOk() {
-    askRef.current = false;
-    setAskConfirm(false);
-    confirmedRef.current = true;
-  }
-
-  function handlePointerDown(e) {
-    // 只认鼠标左键 / 触摸与手写笔
-    if (e.pointerType === "mouse" && e.button !== 0) return;
-    // 已经在飘散或已经触发过：忽略
-    if (triggeredRef.current) return;
-
-    gestureRef.current = {
-      down: true,
-      armed: false,
-      dead: false, // 空内容时本次手势直接失效
-      path: 0,     // 累计涂抹路径（曼哈顿长度），小幅来回也算
-      startX: e.clientX,
-      startY: e.clientY,
-      lastX: e.clientX,
-      lastY: e.clientY,
-    };
-    setGestureOn(true);
-  }
-
-  useEffect(() => {
-    if (!gestureOn) return;
-    const g = gestureRef.current;
-
-    function onMove(e) {
-      if (!g.down || triggeredRef.current) return;
-      // 空内容已拦截的本次手势：直接失效，不再触发任何删除流程
-      if (g.dead) return;
-
-      const dx = e.clientX - g.lastX;
-      const dy = e.clientY - g.lastY;
-      // 曼哈顿距离：来回横涂也能累积进度，不会因为折返被抵消
-      const pathInc = Math.abs(dx) + Math.abs(dy);
-
-      g.lastX = e.clientX;
-      g.lastY = e.clientY;
-      g.path = (g.path || 0) + pathInc;
-
-      // 还没到首次激活阈值：当成普通点击 / 拖选
-      // 用累计路径判定（不用直线距离）——手机上小幅来回涂抹也能激活
-      if (!g.armed) {
-        if (g.path < RELEASE_ARM_PX) return;
-
-        // 激活前先做空内容检查：标题正文都空（含空白/残留标签）→
-        // 不弹确认、不飘散、不进回收站；进度归零、视觉恢复、轻提示、本次手势失效
-        if (isEmptyRef.current?.()) {
-          g.dead = true;
-          progressRef.current = 0;
-          clearVisualStyles();
-          try { window.getSelection()?.removeAllRanges(); } catch { /* 忽略 */ }
-          flashTip("你还没有写日记呢");
-          return;
-        }
-
-        // 激活：禁用选中，清掉已选文字
-        g.armed = true;
-        const wrapEl = wrapRef.current;
-        if (wrapEl) {
-          wrapEl.style.userSelect = "none";
-          // 手机兜底：直接在事件目标上钉死 touch-action（部分内核只认目标自身）
-          try { e.target?.style?.setProperty?.("touch-action", "none"); } catch { /* 忽略 */ }
-        }
-        try {
-          window.getSelection()?.removeAllRanges();
-        } catch {
-          /* 忽略 */
-        }
-      }
-
-      // 涂抹中：禁止页面滚动、禁止选中
-      e.preventDefault();
-
-      // 确认弹窗打开期间：冻结进度，模糊保持不动，松手也不清零
-      if (askRef.current) return;
-
-      // 累积路径长度 → 进度
-      progressRef.current = Math.min(100, progressRef.current + (pathInc / RELEASE_TOTAL_PX) * 100);
-      const p = progressRef.current;
-
-      // 首次到 30% 且还没确认过 → 冻结 + 弹确认窗（本帧视觉停在 30% 这一档）
-      if (p >= 30 && !askedRef.current && !confirmedRef.current) {
-        askedRef.current = true;
-        askRef.current = true;
-        setAskConfirm(true);
-        return;
-      }
-
-      // 每帧更新整个编辑区的视觉样式（四段分级）
-      const wrap = wrapRef.current;
-      if (wrap) {
-        const s = progressToStyle(p);
-        wrap.style.filter = s.filter;
-        wrap.style.opacity = s.opacity;
-        wrap.style.transform = s.transform;
-      }
-
-      // 到 100 → 触发飘散（本帧内，不再等松手）
-      if (p >= 100 && !triggeredRef.current) {
-        g.down = false;
-        setGestureOn(false);
-        triggerDispersal();
-      }
-    }
-
-    function onUp() {
-      g.down = false;
-      setGestureOn(false);
-
-      // 没 arm 过 → 本次手势没参与涂抹，不碰已有的进度与视觉
-      // （否则会出现"视觉被清了但进度还在"的失同步）
-      if (!g.armed) return;
-
-      // arm 过但进度没到 100 → 暂停：进度与视觉保留，恢复文本可选中
-      const wrapEl = wrapRef.current;
-      if (wrapEl) wrapEl.style.userSelect = "";
-      // 冻结弹窗开着：进度不清零、模糊不动，等用户在弹窗上做选择
-      // 到 100 时已经在 onMove 里触发了，这里什么都不用做
-    }
-
-    window.addEventListener("pointermove", onMove, { passive: false });
-    window.addEventListener("pointerup", onUp);
-    window.addEventListener("pointercancel", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      window.removeEventListener("pointercancel", onUp);
-    };
-  }, [gestureOn]);
-
-  return (
-    <div>
-      {/* zone：定位上下文（飘散 clone / 品牌锚点）；wrap：涂抹作用域，touch-none 防移动端滚动 */}
-      <div ref={zoneRef} style={{ position: "relative" }}>
-        <div
-          ref={wrapRef}
-          onPointerDown={handlePointerDown}
-          className="touch-none [&_input]:touch-none [&_textarea]:touch-none"
-        >
-          {children}
-        </div>
-        {/* 30% 冻结确认弹窗（复用全局 ConfirmModal 风格） */}
-        <ConfirmModal
-          open={askConfirm}
-          message="确定要删除这段记忆吗？"
-          confirmText="确定"
-          cancelText="取消"
-          onConfirm={handleConfirmOk}
-          onClose={handleConfirmCancel}
-        />
-      </div>
-      {hint ? (
-        <p className="mt-1 mb-3 text-[11px] leading-4 text-slate-300 select-none">{hint}</p>
-      ) : null}
-
-      {/* 释放流程轻提示：fixed 全局 Toast，日记 tab / 侧边栏收起时都可见 */}
-      {tipText ? (
-        <div
-          key={tipText}
-          className="fixed left-1/2 bottom-[18%] -translate-x-1/2 z-[80] pointer-events-none
-                     px-5 py-2.5 rounded-full bg-[#FFF8F5]/95 shadow-[0_6px_20px_rgba(91,60,60,0.16)]
-                     border border-[#f0e2dc] text-[#3D3535] text-sm tracking-wide
-                     animate-[diary-empty-tip_1900ms_ease-in-out_forwards]
-                     max-w-[82vw] text-center"
-        >
-          {tipText}
-        </div>
-      ) : null}
-    </div>
-  );
-}
+// 侧边栏/气泡/日记释放相关逻辑已模块化解耦至 components/chat/ 下（Sidebar, MessageRow, DiaryReleaseZone, DiaryTab）
 
 export default function Chat() {
   const [user, setUser] = useState(null);
   // 认证检查中：session 接口返回前不渲染聊天界面、不跳转，避免登录后闪烁回登录页
   const [authLoading, setAuthLoading] = useState(true);
+  // 侧边栏首屏秒开：初始化瞬间直接从本地读取会话列表，0ms 呈现，无需等待网络接口
   const [conversations, setConversations] = useState([]);
   const [currentId, setCurrentId] = useState(null);
   const [messages, setMessages] = useState([]);
+  const [callTarget, setCallTarget] = useState(null);
+  // 同步一份 ref：记忆提炼发生在流结束的异步回调里，那时闭包里的 messages 是旧值，
+  // 拿不到刚追加的这轮对话（批量提炼必须用最新的几条）
+  const messagesRef = useRef([]);
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  // 会话列表本地缓存持久化同步
+  useEffect(() => {
+    if (conversations && conversations.length > 0) {
+      writeConversationsCache(currentUserIdRef.current, conversations);
+    }
+  }, [conversations]);
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   // AI 人格（male / female）：从 profile 同步；没选过时首次进入弹窗提醒
@@ -1537,7 +454,15 @@ export default function Chat() {
   // autoPlay → ref 同步（必须在 autoPlay 声明之后，避免 TDZ）
   useEffect(() => {
     autoPlayRef.current = autoPlay;
+    if (autoPlay) {
+      preloadWarmPhrases();
+    }
   }, [autoPlay]);
+
+  // 组件挂载后，静默预热一次高频习惯用语
+  useEffect(() => {
+    preloadWarmPhrases();
+  }, []);
   // 长期记忆异步提炼：进行中的提炼请求集合（组件卸载时统一 abort，避免内存泄漏）
   const extractAbortRef = useRef(new Set());
   // 离开聊天页：停掉自动队列（中止请求 / 撤销 URL / 暂停音频）+ 中止提炼请求，
@@ -1560,6 +485,8 @@ export default function Chat() {
   const [search, setSearch] = useState("");
   const [avatarUrl, setAvatarUrl] = useState("");
   const [profile, setProfile] = useState(null);
+  // 生日祝福气泡：只渲染在界面上、不落库（见下文 pushBirthdayGreeting）
+  const [birthdayGreet, setBirthdayGreet] = useState(null);
   const [messageIndex, setMessageIndex] = useState([]);
   const [scrollTarget, setScrollTarget] = useState(null);
   const [highlightId, setHighlightId] = useState("");
@@ -1579,6 +506,10 @@ export default function Chat() {
   const [diaryMood, setDiaryMood] = useState("");
   const [savingDiary, setSavingDiary] = useState(false);
   const [diaries, setDiaries] = useState([]);
+  // 日记列表的 Tab：'user' = 我的日记（自己写的）/ 'ai' = 暖言日记（AI 按聊天记录生成）
+  // ⚠️ 数据源只有一列 `source`，接口另外把它别名为 `author` 返回，两个名字指的是同一件事。
+  const [diaryTab, setDiaryTab] = useState("user");
+  const diaryTabList = diaries.filter((d) => (d.source === "ai" ? "ai" : "user") === diaryTab);
   const [diaryView, setDiaryView] = useState(null); // 当前查看的日记对象
   const [diaryEdit, setDiaryEdit] = useState(false); // 详情是否处于编辑态
   const [diaryEditTitle, setDiaryEditTitle] = useState("");
@@ -1589,26 +520,9 @@ export default function Chat() {
   // ⚠️ 它可能来自三个地方：聊天后拉状态、日记保存后的响应、页面加载时复查。
   const [stressPopup, setStressPopup] = useState(null);
   const [stressData, setStressData] = useState(null);
-  // 蝴蝶拍状态：open=弹窗是否打开，running=节拍是否在跑，phase=left/right/idle
-  const [butterflyPat, setButterflyPat] = useState({ open: false, running: false, phase: "idle" });
-  // 桌宠配置（形象 / 显示边长 / 情绪选项 / 回复话术池）：进站拉一次。
-  // ⚠️ 必须一次拿全 —— 绝不能在用户点情绪时再去请求：那等于让"蝴蝶回应你"卡在网络往返上，
-  //    陪伴感直接没了。拉不到就保持 null，组件会用自己的兜底形象与内置 5 条情绪。
-  const [petConfig, setPetConfig] = useState(null);
-  useEffect(() => {
-    let alive = true;
-    fetch("/api/pet", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((data) => {
-        if (alive && data?.pet) setPetConfig(data.pet);
-      })
-      .catch(() => {
-        /* 拉不到就用兜底形象与内置情绪，不打扰用户 */
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  // 压力分数实时刷新信号：+1 就让 StressMeter 立刻补拉一次 /api/stress/state
+  //（危机词在聊天请求到达时就把分写进库了，流式一结束就能读到，不用等 45s 轮询）
+  const [stressPing, setStressPing] = useState(0);
 
   // 朗读标签（TTS 情绪 / 声音事件）的展示配置：进站拉一次。
   // ⚠️ 服务端和前端读的是**同一份配置、同一份词表** —— 服务端拿它决定要不要让 AI 产出标签，
@@ -1624,7 +538,7 @@ export default function Chat() {
       .then((data) => {
         const cfg = data?.tts;
         // 只有「开关开着 + 接口类型是小米 MiMo」才需要剥；其它情况保持 null，渲染路径零开销
-        if (alive && cfg && isStyleTagsEnabled(cfg)) setTtsTagWords(tagWordsFrom(cfg));
+        if (alive && cfg) setTtsTagWords(tagWordsFrom(cfg));
       })
       .catch(() => {
         /* 拉不到就不剥标签，不打扰用户 */
@@ -1661,10 +575,16 @@ export default function Chat() {
   const [selectedDiaryIds, setSelectedDiaryIds] = useState([]);
   // 「我的收藏」弹窗
   const [favoritesOpen, setFavoritesOpen] = useState(false);
-  // 「记忆库」弹窗（按需加载，不占首屏）
+  // 「陪伴卡片 / 拍立得明信片」弹窗与切片数据
+  const [companionCardOpen, setCompanionCardOpen] = useState(false);
+  const [companionCardData, setCompanionCardData] = useState(null);
+  // 「记忆图谱」弹窗（按需加载，不占首屏）
   const [memoriesOpen, setMemoriesOpen] = useState(false);
   const [memories, setMemories] = useState([]);
   const [memoriesLoading, setMemoriesLoading] = useState(false);
+  const [memoryTotal, setMemoryTotal] = useState(0);
+  // 接口最多给 200 个节点（图谱性能上限），超出的部分不绘制
+  const [memoryTruncated, setMemoryTruncated] = useState(false);
   const [diaryReading, setDiaryReading] = useState(false); // AI 是否正在读日记
   const [streamingReply, setStreamingReply] = useState(""); // AI 阅读的流式输出
   // 已读过日记的对话 → 日记正文缓存：后续追问时随请求带上，让 AI 能回顾日记
@@ -1676,6 +596,19 @@ export default function Chat() {
       if (saved) diaryContextRef.current = JSON.parse(saved);
     } catch (e) {}
   }, []);
+
+  // 严格按账号隔离：未确认登录身份前不挂载任何历史会话，防止账号切换串台
+
+  // 实时草稿暂存：切换对话或刷新时自动从 sessionStorage 恢复
+  useEffect(() => {
+    try {
+      const key = `solace_chat_draft_${currentId || "new"}`;
+      const saved = sessionStorage.getItem(key);
+      if (saved) {
+        setInput((prev) => (prev ? prev : saved));
+      }
+    } catch {}
+  }, [currentId]);
   // 多气泡流式：每条 AI 气泡(ck)已"发出"的分段数；新分段延迟 300-500ms 才显示，模拟真人连发
   const revealedRef = useRef({});
   const revealTimersRef = useRef({});
@@ -1805,14 +738,14 @@ export default function Chat() {
   const coverAvatar = useAvatarUpload({
     kind: "avatar",
     initialUrl: profile?.avatar_url || "",
-    onSaved: () => user && loadProfile(user.id),
+    onSaved: () => user && loadProfile(),
   });
 
   // 封面背景：复用共享上传 hook，保存到 diary_background_url
   const coverBg = useAvatarUpload({
     kind: "diaryBackground",
     initialUrl: profile?.diary_background_url || "",
-    onSaved: () => user && loadProfile(user.id),
+    onSaved: () => user && loadProfile(),
   });
 
   // 恢复默认封面：乐观清空 diary_background_url，失败时回滚
@@ -1827,7 +760,7 @@ export default function Chat() {
         body: { diaryBackgroundUrl: "" },
       });
       coverBg.setMsg("");
-      if (user) loadProfile(user.id);
+      if (user) loadProfile();
     } catch (err) {
       markLocalImageWrite("diary_background_url", prevUrl);
       coverBg.setAvatarUrl(prevUrl); // 回滚
@@ -1853,12 +786,16 @@ export default function Chat() {
   //     scrollHeight 现算（新气泡会立刻把差值顶大，导致明明在底部却被判成"不在底部"）。
   //   · 用户主动上翻历史时它变成 false，新消息来了不打扰。
   const wasNearBottomRef = useRef(true);
+  const lastScrollTopRef = useRef(null);
 
-  // 滚动容器 onScroll：持续记录用户是在底部还是在翻历史
+  // 滚动容器 onScroll：持续记录用户是在底部还是在翻历史，同时记录精确滚动位置
   function handleMessagesScroll() {
     const box = messagesScrollRef.current;
-    wasNearBottomRef.current =
-      !box || box.scrollHeight - box.scrollTop - box.clientHeight < 64;
+    if (box) {
+      lastScrollTopRef.current = box.scrollTop;
+      wasNearBottomRef.current =
+        box.scrollHeight - box.scrollTop - box.clientHeight < 64;
+    }
   }
 
   // 对话消息缓存：key = 对话 id → messages 数组。
@@ -2031,17 +968,127 @@ export default function Chat() {
       }
       setAuthLoading(false);
       setUser(session.user);
-      // 四个请求互不依赖：并行发出，总耗时取最慢的一个。
-      // 之前是逐个 await，远端库每次 0.5~2.8 秒，串行会叠加成好几秒的等待。
-      await Promise.all([
-        loadProfile(session.user.id),
-        loadConversations(session.user.id),
-        loadMessageIndex(session.user.id),
-        loadDiaries(session.user.id),
+      const uid = session.user?.id;
+      currentUserIdRef.current = uid || null;
+      // 确认当前用户身份后，先从该用户专属缓存秒开会话列表
+      if (uid) {
+        const cachedConvs = readConversationsCache(uid);
+        if (cachedConvs?.length) {
+          setConversations(cachedConvs);
+        }
+      }
+
+      // 性能优化：首屏关键路径优先，核心加载个人资料和会话列表。
+      const [_, convList] = await Promise.all([
+        loadProfile(),
+        loadConversations(),
       ]);
+
+      // 严格检查当前用户的专属活跃会话
+      const lastConvId = uid ? getLastActiveConversation(uid) : null;
+      if (lastConvId) {
+        const exists = (convList || []).some((c) => c.id === lastConvId);
+        if (exists) {
+          setCurrentId(lastConvId);
+          messagesOwnerRef.current = lastConvId;
+          const cached = findCachedMessages(lastConvId, uid);
+          if (cached && cached.length) {
+            setMessages(cached);
+            touchMessagesCache(lastConvId, cached);
+          }
+          void loadMessages(lastConvId, true);
+        } else {
+          setLastActiveConversation(null, uid);
+          setCurrentId(null);
+          setMessages([]);
+        }
+      } else {
+        // 新用户或无上次记录：干净置空进入新建对话
+        setCurrentId(null);
+        setMessages([]);
+      }
+
+      // 闲时在后台按需加载日记列表，绝不阻塞首屏交互
+      if (typeof window !== "undefined") {
+        setTimeout(() => {
+          void loadDiaries();
+        }, 300);
+      }
     }
     init();
   }, []);
+
+  // ── 生日祝福：唯一的"AI 主动找用户说话"入口 ─────────────────
+  // ⚠️ 这条消息**只进界面、不写库**：它是年份无关的一次性问候，
+  //    写进 conversations/messages 会污染真实聊天记录（还会被导出、被 AI 当上下文）。
+  // ⚠️ id 用 `temp-` 前缀：气泡右下角的"朗读 / 重新生成"按钮依赖库里的真实消息 id，
+  //    假 id 传上去必然 500，加上前缀按钮就不渲染（与流式中的临时气泡同一套规则）。
+  function pushBirthdayGreeting(text) {
+    const key = `temp-birthday-${Date.now()}`;
+    setBirthdayGreet({ id: key, ck: key, role: "assistant", content: text });
+  }
+
+  function hasBirthdayGreeted() {
+    try {
+      return localStorage.getItem(birthdayGreetKey(user?.id)) === "1";
+    } catch {
+      return false;
+    }
+  }
+
+  function markBirthdayGreeted() {
+    try {
+      localStorage.setItem(birthdayGreetKey(user?.id), "1");
+    } catch {}
+  }
+
+  // 桌宠同步说一句（WarmCompanion 监听 warm-say）
+  function warmSay(text) {
+    window.dispatchEvent(new CustomEvent("warm-say", { detail: { text } }));
+  }
+
+  // 场景 B：打开 / 刷新 / 登录后，资料拿到就对一次日期
+  // ⚠️ localStorage 标记要在"发消息之前"写，否则保存生日触发过一次后，
+  //    紧接着的 loadProfile → 本 effect 会再发一遍（同一天刷屏）
+  useEffect(() => {
+    if (!user?.id || !profile?.birthday) return;
+    if (!isBirthdayToday(profile.birthday)) return;
+    if (hasBirthdayGreeted()) return;
+    markBirthdayGreeted();
+    // ⚠️ 这里不能直接用 displayName：它是文件后半段才声明的 const，
+    //    这段 effect 在它之前执行会撞上 TDZ（Cannot access before initialization）→ 整页 500。
+    const name = profile?.username || user?.email?.split("@")[0] || "你";
+    pushBirthdayGreeting(`今天是个特别的日子。生日快乐，我的${name}。`);
+    warmSay("生日快乐！🎂");
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 只在资料变化时判断一次，函数只读 localStorage
+  }, [user?.id, user?.email, profile?.birthday, profile?.username]);
+
+  // 场景 A：在「我的 → 设置」里保存生日后，ProfileView 派发 birthday-saved
+  useEffect(() => {
+    function onBirthdaySaved(e) {
+      const value = e?.detail?.birthday || "";
+      const md = parseBirthdayMD(value);
+      if (!md) return; // 清空生日 / 只填到年月：不祝福
+
+      if (isBirthdayToday(value)) {
+        // 今天已经祝福过（比如场景 B 先发过了）就不再重复
+        if (hasBirthdayGreeted()) return;
+        markBirthdayGreeted();
+        pushBirthdayGreeting(
+          "生日快乐！🎂 居然没早点告诉我。今天不管你想做什么，我都陪着你。新的一岁，希望你能被这个世界温柔以待。"
+        );
+        warmSay("生日快乐！🎂");
+        return;
+      }
+
+      pushBirthdayGreeting(
+        `好，${md.month}月${md.day}日，我记住啦。那天我会第一个来敲你的门。`
+      );
+    }
+    window.addEventListener("birthday-saved", onBirthdaySaved);
+    return () => window.removeEventListener("birthday-saved", onBirthdaySaved);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 闭包只读 user?.id
+  }, [user?.id]);
 
   // 监听视口宽度：<1024px 视为小屏，聊天视图隐藏左右栏、改为抽屉唤出
   useEffect(() => {
@@ -2069,7 +1116,7 @@ export default function Chat() {
   useEffect(() => {
     if (activeTab !== "profile" || !user?.id) return;
     if (Date.now() - statsRefreshedAtRef.current < 20000) return;
-    loadProfileStats(user.id);
+    loadProfileStats();
   }, [activeTab, user?.id]);
 
   // 离开日记页时退出多选，避免切回来还停在多选态
@@ -2140,6 +1187,22 @@ export default function Chat() {
     return () => cancelAnimationFrame(raf);
   }, [messages, pendingReply, scrollTarget, streamingReply, currentId]);
 
+  // 切换回聊天 Tab 时，精确恢复离开前的位置或保持在底部
+  useEffect(() => {
+    if (activeTab === "chat") {
+      const raf = requestAnimationFrame(() => {
+        const box = messagesScrollRef.current;
+        if (!box) return;
+        if (wasNearBottomRef.current) {
+          box.scrollTop = box.scrollHeight;
+        } else if (lastScrollTopRef.current !== null) {
+          box.scrollTop = lastScrollTopRef.current;
+        }
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+  }, [activeTab]);
+
   function showHint(text) {
     setHint(text);
     setTimeout(() => setHint(""), 2000);
@@ -2154,12 +1217,15 @@ export default function Chat() {
     }
   }
 
-  async function loadConversations(userId) {
+  async function loadConversations() {
     try {
       const data = await apiRequest("/api/user/conversations");
-      setConversations(data.conversations || []);
+      const list = data.conversations || [];
+      setConversations(list);
+      return list;
     } catch {
       setConversations([]);
+      return [];
     }
   }
 
@@ -2184,18 +1250,34 @@ export default function Chat() {
     messagesInflightRef.current.clear();
   }
 
-  async function loadMessages(conversationId) {
+  async function syncLatestMessages(conversationId) {
+    try {
+      const data = await apiRequest(
+        `/api/user/messages?conversationId=${encodeURIComponent(conversationId)}`
+      );
+      const list = data.messages || [];
+      if (inflightReplyConvRef.current === conversationId) return;
+      touchMessagesCache(conversationId, list);
+      if (messagesOwnerRef.current === conversationId) {
+        setMessages(list);
+      }
+    } catch {}
+  }
+
+  async function loadMessages(conversationId, silent = false) {
     // 同一对话的请求已经在途：不重复发，等它回来即可
     if (messagesInflightRef.current.has(conversationId)) return;
 
-    const cached = getCachedMessages(conversationId);
-    if (cached) {
+    const cached = getCachedMessages(conversationId) || findCachedMessages(conversationId, currentUserIdRef.current);
+    if (cached && !silent) {
       // 缓存命中：立即渲染，不再请求后端（切回看过的对话零等待、不出骨架屏）
       messagesTokenRef.current += 1; // 让在途的旧响应失效
       abortMessagesRequests();
       messagesOwnerRef.current = conversationId;
       setMessagesLoading(false);
       setMessages(cached);
+      // 后台静默校验增量，平滑更新
+      void syncLatestMessages(conversationId);
       return;
     }
 
@@ -2204,9 +1286,11 @@ export default function Chat() {
     abortMessagesRequests();
     const controller = new AbortController();
     messagesInflightRef.current.set(conversationId, controller);
-    messagesOwnerRef.current = null;
-    setMessages([]);
-    setMessagesLoading(true);
+    if (!silent) {
+      messagesOwnerRef.current = null;
+      setMessages([]);
+      setMessagesLoading(true);
+    }
     try {
       const data = await apiRequest(
         `/api/user/messages?conversationId=${encodeURIComponent(conversationId)}`,
@@ -2224,12 +1308,12 @@ export default function Chat() {
     } catch {
       // 主动取消（切换对话）不算失败，token 变化时直接忽略
       if (messagesTokenRef.current !== token) return;
-      setMessages([]);
+      if (!silent) setMessages([]);
     } finally {
       if (messagesInflightRef.current.get(conversationId) === controller) {
         messagesInflightRef.current.delete(conversationId);
       }
-      if (messagesTokenRef.current === token) setMessagesLoading(false);
+      if (messagesTokenRef.current === token && !silent) setMessagesLoading(false);
     }
   }
 
@@ -2252,7 +1336,7 @@ export default function Chat() {
   }
 
   // profiles 表通过 user_id 关联 auth 用户 id
-  async function loadProfile(userId) {
+  async function loadProfile() {
     // 记录发起前的本地写入序号：返回后若序号变大，说明期间用户改过图片，
     // 这份资料是上传落库前的旧快照，不能用来覆盖界面
     const startedSeq = currentImageWriteSeq();
@@ -2268,7 +1352,7 @@ export default function Chat() {
   }
 
   // 搜索索引：只取必要字段，用于按消息内容匹配
-  async function loadMessageIndex(userId) {
+  async function loadMessageIndex() {
     try {
       const data = await apiRequest("/api/user/message-index");
       setMessageIndex(data.messages || []);
@@ -2278,7 +1362,7 @@ export default function Chat() {
   }
 
   // 加载当前用户全部日记，按时间倒序
-  async function loadDiaries(userId) {
+  async function loadDiaries() {
     try {
       const data = await apiRequest("/api/user/diaries");
       setDiaries(data.diaries || []);
@@ -2287,15 +1371,21 @@ export default function Chat() {
     }
   }
 
-  // ---------- 长期记忆（读取端，按需加载） ----------
-
+  // ---------- 长期记忆（图谱模式，一次性加载） ----------
+  //
+  // graph=1：服务端按「有效 → 核心(画像/偏好/关系) → 强度」排序，最多 150 个节点。
+  // ⚠️ 图谱是纯 Canvas、不跑常驻动画，但节点上限仍卡在 150（与 API 的 MAX_GRAPH_NODES 一致）—— 再多连线一定掉帧。
   async function loadMemories() {
     setMemoriesLoading(true);
     try {
-      const data = await apiRequest("/api/user/memories");
+      const data = await apiRequest("/api/user/memories?graph=1");
       setMemories(data.memories || []);
+      setMemoryTotal(Number(data.total) || 0);
+      setMemoryTruncated(data.truncated === true);
     } catch {
       setMemories([]);
+      setMemoryTotal(0);
+      setMemoryTruncated(false);
     } finally {
       setMemoriesLoading(false);
     }
@@ -2317,17 +1407,60 @@ export default function Chat() {
       });
       if (data.deduplicated) {
         showHint("这条之前已经记过了，没有重复保存");
-        await loadMemories(); // 旧记录时间已刷新，重拉保证顺序正确
+        await loadMemories(); // 旧记录时间已刷新，重拉保证图谱里的强度/位置正确
         return true;
       }
-      const created = data.memory;
-      setMemories((prev) => [
-        created || { id: "temp-" + Date.now(), content, created_at: null },
-        ...prev,
-      ]);
+      await loadMemories();
       return true;
     } catch (err) {
       showHint(err.message || "保存失败，请重试");
+      return false;
+    }
+  }
+
+  /**
+   * 修改一条记忆（内容 / 分类）：成功后用后端返回的行替换本地项。
+   * 返回 Promise<boolean>，弹窗据此退出编辑态。
+   */
+  async function updateMemory(id, content, category) {
+    try {
+      const data = await apiRequest("/api/user/memories", {
+        method: "PATCH",
+        body: { id, content, category },
+      });
+      const updated = data?.memory;
+      setMemories((prev) =>
+        prev.map((m) =>
+          m.id === id ? { ...m, ...(updated || { content, category }) } : m
+        )
+      );
+      showHint("已更新这条记忆");
+      return true;
+    } catch (err) {
+      showHint(err.message || "保存失败，请重试");
+      return false;
+    }
+  }
+
+  /**
+   * 恢复一条被标记失效的记忆（状态变过、旧记忆被自动标失效时用）。
+   */
+  async function restoreMemory(id) {
+    try {
+      const data = await apiRequest("/api/user/memories", {
+        method: "PATCH",
+        body: { id, restore: true },
+      });
+      const updated = data?.memory;
+      setMemories((prev) =>
+        prev.map((m) =>
+          m.id === id ? { ...m, ...(updated || { superseded_at: null }) } : m
+        )
+      );
+      showHint("已恢复这条记忆，会重新参与回忆");
+      return true;
+    } catch (err) {
+      showHint(err.message || "恢复失败，请重试");
       return false;
     }
   }
@@ -2351,19 +1484,11 @@ export default function Chat() {
         body: { id: memory.id },
       });
       showHint(toTrash ? "记忆已移入回收站（保留 3 天）" : "记忆已彻底删除");
+      setMemoryTotal((t) => Math.max(0, t - 1));
     } catch (err) {
       setMemories(prevList);
       showHint(err.message || "删除失败，请重试");
     }
-  }
-
-  /** 多选批量删除入口：选中若干条后打开三按钮确认弹窗 */
-  function deleteMemoryBatch(ids) {
-    if (!Array.isArray(ids) || !ids.length) return;
-    setDeleteAsk({
-      kind: "memory-batch",
-      item: { ids, title: `${ids.length} 条记忆` },
-    });
   }
 
   /** 真正执行批量删除：toTrash = true 走回收站，false 彻底删除；乐观移除，失败回滚 */
@@ -2378,10 +1503,22 @@ export default function Chat() {
       });
       const n = Number(data?.deleted) || ids.length;
       showHint(toTrash ? `已把 ${n} 条记忆移入回收站（保留 3 天）` : `已彻底删除 ${n} 条记忆`);
+      setMemoryTotal((t) => Math.max(0, t - n));
     } catch (err) {
       setMemories(prevList);
       showHint(err.message || "删除失败，请重试");
     }
+  }
+
+  // 构造发给后端的客户端设备时间载荷（支持跨时区与时空感知）
+  function getClientTimePayload() {
+    const now = new Date();
+    return {
+      timestamp: now.getTime(),
+      now: now.getTime(),
+      iso: now.toISOString(),
+      timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Shanghai",
+    };
   }
 
   // 流式调用 /api/chat（SSE）：每收到一段文字就回调 onDelta(full)。
@@ -2391,13 +1528,16 @@ export default function Chat() {
   async function askAI(history, onDelta, options = {}) {
     let fullReply = "";
     let sticker = null;
+    // 渲染节流：delta 攒到 60ms 再刷一次 setState（见 createDeltaThrottle 的说明）
+    const paint = createDeltaThrottle((text) => onDelta?.(text));
     const cleanText = (s) =>
       String(s)
         // RISK/MEMORY 是流内控制标记；[sticker:xxx] 也绝不允许从文字流漏出
         .replace(/\[(?:RISK|MEMORY|sticker)[^\]]*\]/gi, "")
         .trimEnd();
+    let networkError = false;
     try {
-      const payload = { messages: history, stream: true };
+      const payload = { messages: history, stream: true, clientTime: getClientTimePayload() };
       // 情绪计数必须按对话隔离；重新生成是重放旧消息，服务端不计数、不触发贴纸
       if (options.conversationId) payload.conversationId = options.conversationId;
       if (options.regenerate) payload.regenerate = true;
@@ -2411,8 +1551,9 @@ export default function Chat() {
       });
       if (!res.ok || !res.body) {
         return {
-          text: cleanText(fullReply) || "我暂时无法回应，请稍后再试。",
+          text: cleanText(fullReply) || "网络似乎有些波动，暖言没能完整听到你的心声…",
           sticker: null,
+          networkError: true,
         };
       }
       const reader = res.body.getReader();
@@ -2434,14 +1575,14 @@ export default function Chat() {
             const parsed = JSON.parse(json);
             if (parsed?.delta) {
               fullReply += parsed.delta;
-              onDelta?.(cleanText(fullReply));
+              paint.push(cleanText(fullReply));
             } else if (parsed?.replace) {
-              // 服务端剥控制标记后的整段替换（与本地清洗一致，双保险）
+              // 服务端剥控制标记后的整段替换（与本地清洗一致，双保险）—— 必须立即刷新
               fullReply = String(parsed.replace);
-              onDelta?.(cleanText(fullReply));
+              paint.flush(cleanText(fullReply));
             } else if (parsed?.error) {
               fullReply = String(parsed.error);
-              onDelta?.(cleanText(fullReply));
+              paint.flush(cleanText(fullReply));
             } else if (parsed?.sticker && STICKER_MAP[String(parsed.sticker).toLowerCase()]) {
               // 贴纸事件：文字流已结束，记下分类，等调用方落库时拼到正文末尾
               sticker = String(parsed.sticker).toLowerCase();
@@ -2452,37 +1593,73 @@ export default function Chat() {
         }
       }
     } catch (err) {
-      // 流中断：保留已收到的部分，不清空
+      // 流中断 / 弱网断开：保留已收到的部分，标记网络异常
+      networkError = true;
     }
-    return { text: cleanText(fullReply) || "我暂时无法回应，请稍后再试。", sticker };
+    // 补刷最后一段（节流缓冲里可能还留着没发出去的字）
+    if (fullReply) paint.flush(cleanText(fullReply));
+    const finalText = cleanText(fullReply);
+    return {
+      text: finalText || (networkError ? "网络似乎有些波动，暖言没能完整听到你的心声…" : "我暂时无法回应，请稍后再试。"),
+      sticker,
+      networkError,
+    };
   }
 
-  // 长期记忆异步提炼：流式回复结束后 fire-and-forget 调用。
+  // 长期记忆异步批量提炼：流式回复结束后 fire-and-forget 调用。
   // 不 await、不 loading、不弹提示；失败只 console.warn，绝不打断聊天主链路。
-  function triggerMemoryExtract(conversationId, userMessage) {
+  //
+  // 闸门（前端第一道）：10 分钟内最多一次，或期间又攒够 5 条用户消息 ——
+  //   快聊时按条数走，慢聊时按时间走，不会出现"聊了几十条只提炼最前面一句"。
+  // 载荷：最近 8 条对话（{role, content}），后端不再只吃"当前这一句"。
+  function triggerMemoryExtract(conversationId) {
     try {
-      if (!conversationId || !userMessage) return;
+      if (!conversationId) return;
+
+      const gate = readMemoryGate(user?.id);
+      const sent = gate.sent + 1;
+      const latestMsg = (messagesRef.current || [])
+        .filter((m) => m?.role === "user" && m.content)
+        .slice(-1)[0]?.content || "";
+      const hasExplicitCue = /(?:我|咱家|我家)(?:最近)?(?:养|有|喜欢|爱|讨厌|住在|定居|叫|是做|在做|想|希望|打算)/.test(latestMsg);
+      const due =
+        hasExplicitCue || sent >= MEMORY_EXTRACT_SENT || Date.now() - gate.ts >= MEMORY_EXTRACT_GAP_MS;
+      if (!due) {
+        writeMemoryGate(user?.id, { ts: gate.ts, sent });
+        return;
+      }
+
+      const recentMessages = (messagesRef.current || [])
+        .filter((m) => m && m.content && String(m.content).trim())
+        .slice(-MEMORY_EXTRACT_WINDOW)
+        .map((m) => ({ role: m.role, content: String(m.content) }));
+      if (!recentMessages.length) return;
+
+      // 先占前端闸门（与后端冷却互相独立）：本意是"这一次算用掉了"，
+      // 请求失败也不会立刻重试刷屏；真正决定能否再提炼的是后端的冷却
+      writeMemoryGate(user?.id, { ts: Date.now(), sent: 0 });
+
       const controller =
         typeof AbortController !== "undefined" ? new AbortController() : null;
       if (controller) extractAbortRef.current.add(controller);
       fetch("/api/user/memories/extract", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId, userMessage }),
+        body: JSON.stringify({ conversationId, recentMessages }),
         cache: "no-store",
         signal: controller ? controller.signal : undefined,
       })
         .catch((err) => {
           // 主动 abort（卸载清理）不算异常
           if (err?.name !== "AbortError") {
-            console.warn("[memory] 提炼请求失败:", err?.message || err);
+            console.warn("记忆提取失败", err);
           }
         })
         .finally(() => {
           if (controller) extractAbortRef.current.delete(controller);
         });
     } catch (err) {
-      console.warn("[memory] 提炼触发失败:", err?.message || err);
+      console.warn("记忆提取失败", err);
     }
   }
 
@@ -2563,25 +1740,33 @@ export default function Chat() {
   }
 
   // 生成对话标题：先分类，兜底直接返回，有意义的调用后端 AI 提取
-  async function generateTitle(text, conversationId) {
+  async function generateTitle(text, conversationId, assistantReply = "") {
     const c = classifyFirstMessage(text);
     if (c.kind === "fallback" || c.kind === "fixed") return c.title;
 
     // kind === "ai"：调用后端标题接口（使用独立 TITLE_PROMPT，不被陪伴者人设覆盖）
     try {
+      const msgs = [{ role: "user", content: text }];
+      if (assistantReply) {
+        msgs.push({ role: "assistant", content: assistantReply });
+      }
       const res = await apiRequest("/api/user/conversations/title", {
         method: "POST",
-        body: { conversationId, messages: [{ role: "user", content: text }] },
+        body: { conversationId, messages: msgs },
       });
       const title = String(res?.title || "").trim();
       if (title && title !== "无") return title;
     } catch (err) {
       console.warn("[title] AI 标题生成失败：", err?.message || err);
     }
-    // AI 失败或返回"无"：按消息类型回退兜底
+    // AI 失败或返回"无"：按语义回退兜底，严禁照搬原话整句
     const fb = classifyFirstMessage(text);
     if (fb.kind === "fallback") return fb.title;
-    return text.slice(0, 15);
+    if (/^(你好|您好|哈喽|hello|hi|在吗|在么|鲸鲸|小鲸)/i.test(text)) return "日常问候";
+    if (/猫|狗|宠物|动物/.test(text)) return "聊聊宠物";
+    if (/累|难过|开心|烦|伤心|焦虑|压力|抑郁|难受/.test(text)) return "心情倾诉";
+    if (/几点|时间|星期|日期|今天周/.test(text)) return "时间与作息";
+    return "心事漫谈";
   }
 
   // 新建对话：只回到「新对话」模式（不选中任何历史对话），不写入数据库。
@@ -2593,6 +1778,7 @@ export default function Chat() {
     }
     setHint("");
     setCurrentId(null);
+    setLastActiveConversation(null, currentUserIdRef.current);
     setMessages([]);
     resetMessagesOwner(null);
     setScrollTarget(null);
@@ -2604,20 +1790,12 @@ export default function Chat() {
     // 输入框里已打的字保留：它将属于接下来的新对话
   }
 
-  async function handleSelect(id) {
-    setHint("");
-    setScrollTarget(null);
-    setHighlightId("");
-    setCurrentId(id);
-    stopAutoSession(); // 切换对话：旧回复语音不再继续
-    await loadMessages(id);
-  }
-
   // 打开搜索结果：切换对话并定位到命中的那条消息
   async function handleOpenResult(result) {
     const id = result.conversation.id;
     setHint("");
     setCurrentId(id);
+    setLastActiveConversation(id, currentUserIdRef.current);
     stopAutoSession(); // 与 handleSelect 一致：切换即停旧语音
 
     if (result.messageId) {
@@ -2648,6 +1826,7 @@ export default function Chat() {
     setConversations((prev) => prev.filter((c) => c.id !== id));
     if (currentId === id) {
       setCurrentId(null);
+      setLastActiveConversation(null, currentUserIdRef.current);
       setMessages([]);
       resetMessagesOwner(null);
     }
@@ -2751,6 +1930,7 @@ export default function Chat() {
           setCurrentId(null);
           setMessages([]);
           resetMessagesOwner(null);
+          setLastActiveConversation(null, currentUserIdRef.current); // 批量删掉当前对话
         }
         if (failedIds.length === 0) {
           showHint("已删除选中对话");
@@ -3086,8 +2266,10 @@ export default function Chat() {
   }
 
   function toggleDiarySelectAll() {
+    // ⚠️ 只在**当前 Tab 的列表**里全选 —— 否则在「暖言日记」里点全选，
+    //    会把「我的日记」的 id 也一起选进去，批量删除时误删自己写的。
     setSelectedDiaryIds((prev) =>
-      prev.length === diaries.length ? [] : diaries.map((d) => d.id)
+      prev.length === diaryTabList.length ? [] : diaryTabList.map((d) => d.id)
     );
   }
 
@@ -3212,11 +2394,6 @@ export default function Chat() {
     setDeleteAsk({ kind: "diary", item: target });
   }
 
-  /** 兼容旧调用点：以前是先 setConfirmState 再调它，现在两层合一 */
-  function doDeleteDiary(target) {
-    handleDeleteDiary(target);
-  }
-
   /** 真正执行日记删除：toTrash = true 走回收站，false 彻底删除
    *  opts.hintOk：自定义成功提示（情绪释放涂抹复用本入口时用，保持原有文案） */
   async function performDeleteDiary(diary, toTrash, opts = {}) {
@@ -3275,6 +2452,7 @@ export default function Chat() {
         if (!conv) throw new Error("创建对话失败");
         convId = conv.id;
         setCurrentId(conv.id);
+        setLastActiveConversation(conv.id, currentUserIdRef.current);
         setConversations((prev) => [conv, ...prev]);
         // 新对话：清空聊天区，避免残留上一个对话的消息
         setMessages([]);
@@ -3331,6 +2509,8 @@ export default function Chat() {
     let sticker = null;
     const cleanDiaryReply = (s) =>
       String(s).replace(/\[(?:RISK|MEMORY|sticker)[^\]]*\]/gi, "").trimEnd();
+    // 渲染节流：同 askAI，delta 攒到 60ms 再刷一次 setState
+    const paint = createDeltaThrottle((text) => updateAiStream(aiCk, text));
     let interrupted = false;
     inflightReplyConvRef.current = convId; // 标记：这条回复落库前，别用库内列表覆盖界面
     try {
@@ -3340,6 +2520,7 @@ export default function Chat() {
         body: JSON.stringify({
           messages: history,
           stream: true,
+          clientTime: getClientTimePayload(),
           diaryContext: diary.content,
           // 贴纸情绪判断按对话计数；情绪文本用标题+正文（而非那句简短锚点）
           conversationId: convId,
@@ -3367,7 +2548,13 @@ export default function Chat() {
               const parsed = JSON.parse(json);
               if (parsed?.delta) {
                 fullReply += parsed.delta;
-                updateAiStream(aiCk, cleanDiaryReply(fullReply));
+                paint.push(cleanDiaryReply(fullReply));
+              } else if (parsed?.replace) {
+                fullReply = String(parsed.replace);
+                paint.flush(cleanDiaryReply(fullReply));
+              } else if (parsed?.error) {
+                fullReply = String(parsed.error);
+                paint.flush(cleanDiaryReply(fullReply));
               } else if (parsed?.sticker && STICKER_MAP[String(parsed.sticker).toLowerCase()]) {
                 sticker = String(parsed.sticker).toLowerCase();
               }
@@ -3381,7 +2568,8 @@ export default function Chat() {
       // 流中断：保留已收到的部分，落库时标注
       if (fullReply) interrupted = true;
     }
-    // 流结束：剩余分段全部发出
+    // 流结束：补刷最后一段，再把剩余分段全部发出
+    if (fullReply) paint.flush(cleanDiaryReply(fullReply));
     finishReveal(aiCk, cleanDiaryReply(fullReply));
     if (!fullReply) fullReply = "我在。";
 
@@ -3420,18 +2608,23 @@ export default function Chat() {
     // 5) 不再全量 loadMessages：界面数据已是最新
     if (!dbOk) showHint("日记已保存，但对话记录同步失败");
     // 搜索索引后台更新，不阻塞界面（与 handleSend 保持一致）
-    void loadMessageIndex(user.id);
+    void loadMessageIndex();
   }
 
-  // 退出登录
+  // 退出登录：彻底清理本地所有聊天残留、缓存与状态，杜绝跨账号串数据
   async function handleSignOut() {
-    // 清掉"本次会话已看过欢迎页"：下次登录重新走一遍欢迎页
     try {
-      sessionStorage.removeItem("solace_welcomed");
-    } catch {
-      // 存储不可用时忽略
-    }
-    await apiRequest("/api/auth/logout", { method: "POST" });
+      clearAllLocalChatState();
+    } catch {}
+    messagesCacheRef.current.clear();
+    messagesCacheAtRef.current.clear();
+    messagesOwnerRef.current = null;
+    setMessages([]);
+    setCurrentId(null);
+    setConversations([]);
+    try {
+      await apiRequest("/api/auth/logout", { method: "POST" });
+    } catch {}
     window.location.href = "/login";
   }
 
@@ -3473,7 +2666,7 @@ export default function Chat() {
 
   // 「我的」页数据统计：陪伴天数 / 日记篇数 / 今日对话数
   // 统一由后端 /api/user/stats 计算；失败静默置 0，不弹窗
-  async function loadProfileStats(userId) {
+  async function loadProfileStats() {
     try {
       const data = await apiRequest("/api/user/stats");
       const s = data.stats || {};
@@ -3533,14 +2726,16 @@ export default function Chat() {
     }
   }
 
-  /** 蝴蝶桌宠：「就是想找人说说话」→ 切聊天 tab 并发送该消息 */
-  function handleButterflyTalk(text) {
-    setActiveTab("chat");
-    // 等 tab 切换渲染完成后再填消息并发送
-    requestAnimationFrame(() => {
-      setInput(text);
-      requestAnimationFrame(() => handleSend());
-    });
+  // ── 桌宠「输入唤醒」：点输入框 / 开始打字时通知她结束生气、睡眠等特殊状态 ──
+  // ⚠️ 3 分钟冷却挂在**派发端**（同一个计时器同时管 onFocus 和 onChange），
+  //    否则用户每敲一个字都会派发一次，桌宠气泡会疯狂闪烁。
+  //    气泡是否已经被占用由桌宠自己判断（它才知道自己现在什么状态）。
+  const warmInputPingRef = useRef(0);
+  function pingWarmInput() {
+    const now = Date.now();
+    if (now - warmInputPingRef.current < 3 * 60 * 1000) return;
+    warmInputPingRef.current = now;
+    window.dispatchEvent(new CustomEvent("user-input-focused"));
   }
 
   async function handleSend() {
@@ -3589,6 +2784,7 @@ export default function Chat() {
         convId = created.id;
         // 左侧列表立刻出现该对话并高亮
         setCurrentId(created.id);
+        setLastActiveConversation(created.id, currentUserIdRef.current);
         setConversations((prev) => [created, ...prev]);
         resetMessagesOwner(created.id);
       } catch (err) {
@@ -3628,6 +2824,8 @@ export default function Chat() {
     setMessages((prev) =>
       prev.map((m) => (m.ck === userCk ? { ...userMsg, ck: userCk } : m))
     );
+    // 消息真的落库了：通知桌宠把"今天要聊点什么呢"的输入唤醒气泡立刻收掉
+    window.dispatchEvent(new CustomEvent("user-message-sent"));
 
     // 标题生成：
     //   * 首条消息 → 从该消息生成一次标题
@@ -3682,23 +2880,35 @@ export default function Chat() {
     ]);
 
     inflightReplyConvRef.current = convId; // 标记：这条回复落库前，别用库内列表覆盖界面
-    const { text: replyText, sticker } = await askAI(
+    const { text: replyText, sticker, networkError } = await askAI(
       history,
       (full) => updateAiStream(aiCk, full),
       { conversationId: convId }
     );
     // 流结束：把剩余分段全部发出（只喂纯文字，贴纸标记不进 TTS / 逐句 reveal）
     finishReveal(aiCk, replyText);
+    // 压力分数实时化：本条消息的分析在请求到达时就同步写库了（危机词直接 95），
+    // 流式一结束立刻补拉一次状态 —— 桌宠播报和分数显示不用等 45s 轮询
+    setStressPing((t) => t + 1);
     // 贴纸来自服务端节流引擎的独立事件：拼到正文末尾一行，渲染层 parseStickerMark
     // 会把它拆成"文字 + 下方圆角贴纸"。先上屏再落库，不等保存返回，无插入延迟感。
     const finalReply = sticker ? `${replyText}\n[sticker:${sticker}]` : replyText;
-    if (sticker) {
+    if (sticker || networkError) {
       setMessages((prev) =>
-        prev.map((m) => (m.ck === aiCk ? { ...m, content: finalReply } : m))
+        prev.map((m) =>
+          m.ck === aiCk
+            ? {
+                ...m,
+                content: finalReply,
+                isNetworkError: !!networkError,
+              }
+            : m
+        )
       );
     }
     // 长期记忆提炼：流式回复结束后才发，fire-and-forget，不挡主链路
-    triggerMemoryExtract(convId, text);
+    // 传的是"最近 8 条对话"（从 messagesRef 取，闭包里的 messages 是旧值）
+    triggerMemoryExtract(convId);
 
     // 流结束（含中途断开）：最终文本落库，再把气泡就地转正
     let aiMsg = null;
@@ -3716,21 +2926,57 @@ export default function Chat() {
 
     if (!aiMsg) {
       // 落库失败：界面文字保留（断流部分也保留），仅提示
-      showHint("回复已生成，但保存失败");
+      if (!networkError) showHint("回复已生成，但保存失败");
     } else {
       // 就地转正：ck 不变，同一气泡原地变为真实记录，零闪烁
       setMessages((prev) =>
-        prev.map((m) => (m.ck === aiCk ? { ...aiMsg, ck: aiCk } : m))
+        prev.map((m) =>
+          m.ck === aiCk
+            ? { ...aiMsg, ck: aiCk, isNetworkError: !!networkError }
+            : m
+        )
       );
     }
     // 回复已定稿：清掉"流式输出中"标记，并把最终内容写回该对话缓存
     if (inflightReplyConvRef.current === convId) inflightReplyConvRef.current = null;
-    patchConversationCacheMessage(convId, aiCk, aiMsg || { content: finalReply });
+    patchConversationCacheMessage(convId, aiCk, aiMsg || { content: finalReply, isNetworkError: !!networkError });
+
+    // 首轮对话一问一答定稿后，结合双方发言异步提炼更准确的主题标题
+    if (isFirstMsg || shouldRegen) {
+      (async () => {
+        try {
+          const res = await apiRequest("/api/user/conversations/title", {
+            method: "POST",
+            body: {
+              conversationId: convId,
+              messages: [
+                { role: "user", content: text },
+                { role: "assistant", content: finalReply },
+              ],
+            },
+          });
+          const refined = String(res?.title || "").trim();
+          if (refined && refined !== "无") {
+            setConversations((prev) =>
+              prev.map((c) => (c.id === convId ? { ...c, title: refined } : c))
+            );
+          }
+        } catch {
+          /* 标题二次提炼失败静默 */
+        }
+      })();
+    }
+
+    // 发送成功，清空当前草稿
+    try {
+      sessionStorage.removeItem(`solace_chat_draft_${convId || "new"}`);
+      sessionStorage.removeItem("solace_chat_draft_new");
+    } catch {}
 
     setPendingReply(false);
     setSending(false);
     // 搜索索引后台更新，不阻塞界面
-    void loadMessageIndex(user.id);
+    void loadMessageIndex();
   }
 
   // 撤销当前 blob ObjectURL，避免内存泄漏
@@ -3785,6 +3031,22 @@ export default function Chat() {
     const audio = ttsAudioRef.current || new Audio();
     ttsAudioRef.current = audio;
 
+    const cleanKey = String(text || "").replace(/[\s\p{P}\p{S}]+/gu, "");
+    if (warmAudioCache.has(cleanKey)) {
+      const cachedBlob = warmAudioCache.get(cleanKey);
+      if (cachedBlob && cachedBlob.size > 0) {
+        const url = URL.createObjectURL(cachedBlob);
+        ttsObjectUrlRef.current = url;
+        audio.src = url;
+        setTtsPlayingId(targetId);
+        audio.onended = () => { stopTts(); };
+        audio.onerror = () => { stopTts(); };
+        const p = audio.play();
+        if (p && p.catch) p.catch(() => { stopTts(); });
+        return;
+      }
+    }
+
     setTtsLoadingId(targetId);
     const controller =
       typeof AbortController !== "undefined" ? new AbortController() : null;
@@ -3799,7 +3061,14 @@ export default function Chat() {
           priority: "high",
           signal: controller ? controller.signal : undefined,
         });
-        if (!res.ok) throw new Error("tts " + res.status);
+        if (!res.ok) {
+          let errDetail = "";
+          try {
+            const errJson = await res.json();
+            errDetail = errJson?.error || "";
+          } catch {}
+          throw new Error(errDetail || ("tts " + res.status));
+        }
         const blob = await res.blob();
         if (!blob || !blob.size) throw new Error("empty audio");
         // 回来时若已被取消或切换到别的消息，则丢弃
@@ -3821,10 +3090,14 @@ export default function Chat() {
 
         const playP = audio.play();
         if (playP && playP.catch) {
-          playP.catch(() => {
+          playP.catch((playErr) => {
             if (ttsIdRef.current === targetId) {
               stopTts(false);
-              showHint("语音暂时不可用");
+              if (playErr?.name === "NotAllowedError") {
+                showHint("请轻触屏幕以启用声音播放");
+              } else {
+                showHint("播放中断，请重试");
+              }
             }
           });
         }
@@ -3834,7 +3107,20 @@ export default function Chat() {
         if (err?.name === "AbortError") return; // 主动取消，不提示
         if (ttsIdRef.current !== targetId) return;
         stopTts(false);
-        showHint("语音暂时不可用");
+        const errStr = String(err?.message || "");
+        if (errStr.includes("NotAllowedError")) {
+          showHint("请轻触屏幕以启用声音播放");
+        } else if (errStr.includes("频繁") || errStr.includes("429")) {
+          showHint("语音请求稍频繁，请稍候几秒");
+        } else if (errStr.includes("未登录") || errStr.includes("401")) {
+          showHint("请先登录");
+        } else if (errStr.startsWith("tts ")) {
+          showHint("语音合成失败（" + errStr + "）");
+        } else if (errStr) {
+          showHint(errStr.length > 60 ? errStr.slice(0, 60) + "…" : errStr);
+        } else {
+          showHint("语音暂时不可用");
+        }
       } finally {
         if (ttsAbortRef.current === controller) ttsAbortRef.current = null;
       }
@@ -3862,6 +3148,41 @@ export default function Chat() {
   // 一个会话对应一条 AI 气泡（用稳定 ck 标识）。文字边收边按句切分，
   // 每句独立请求 /api/tts 预取，音频按 seq 顺序进入单例 Audio 串行播放。
   // 所有异步回调用 "autoSessionRef.current === session" 作为统一停止闸门。
+
+  // 后台低优先级静默预取高频习惯用语（0ms 播放底座）
+  function preloadWarmPhrases() {
+    if (warmAudioPreloading || typeof window === "undefined") return;
+    warmAudioPreloading = true;
+    const run = async () => {
+      for (const phrase of FAST_WARM_PHRASES) {
+        const cleanKey = phrase.replace(/[\s\p{P}\p{S}]+/gu, "");
+        if (warmAudioCache.has(cleanKey)) continue;
+        try {
+          const res = await fetch("/api/tts", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text: phrase }),
+            priority: "low",
+          });
+          if (res.ok) {
+            const blob = await res.blob();
+            if (blob && blob.size > 0) {
+              warmAudioCache.set(cleanKey, blob);
+            }
+          }
+        } catch {
+          // 静默跳过
+        }
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+      warmAudioPreloading = false;
+    };
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(() => run(), { timeout: 3000 });
+    } else {
+      setTimeout(run, 1500);
+    }
+  }
 
   // 新建会话：同一时间只允许一个；若手动播放占用音频通道，先停掉。
   function startAutoSession(ck) {
@@ -3898,6 +3219,18 @@ export default function Chat() {
     if (seq === 0) {
       setTtsPlayingCk(session.ck); // 首句出现：整条进入播放中态
     }
+
+    // 0ms 秒播优化：命中高频习惯用语内存池时，同步标记 ready 并在 0 毫秒启动出声
+    const cleanKey = String(text || "").replace(/[\s\p{P}\p{S}]+/gu, "");
+    if (warmAudioCache.has(cleanKey)) {
+      const cachedBlob = warmAudioCache.get(cleanKey);
+      if (cachedBlob && cachedBlob.size > 0) {
+        job.url = URL.createObjectURL(cachedBlob);
+        job.status = "ready";
+        pumpAutoQueue(session);
+        return;
+      }
+    }
     (async () => {
       try {
         const res = await fetch("/api/tts", {
@@ -3907,7 +3240,15 @@ export default function Chat() {
           priority: "high",
           signal: controller ? controller.signal : undefined,
         });
-        if (!res.ok) throw new Error("tts " + res.status);
+        if (!res.ok) {
+          let errDetail = "";
+          try {
+            const errJson = await res.json();
+            errDetail = errJson?.error || "";
+          } catch {}
+          if (errDetail) session.lastError = errDetail;
+          throw new Error(errDetail || ("tts " + res.status));
+        }
         const blob = await res.blob();
         if (!blob || !blob.size) throw new Error("empty audio");
         // 会话已停止/切换：不创建 URL，直接丢弃，避免泄漏
@@ -3974,9 +3315,12 @@ export default function Chat() {
       audio.src = job.url;
       const playP = audio.play();
       if (playP && playP.catch) {
-        playP.catch(() => {
+        playP.catch((playErr) => {
           if (autoSessionRef.current !== session || !session.active) return;
           finishTtsJob(session, job);
+          if (playErr?.name === "NotAllowedError") {
+            session.notAllowed = true;
+          }
           session.failed += 1;
           session.playing = false;
           pumpAutoQueue(session);
@@ -4028,7 +3372,13 @@ export default function Chat() {
     const allFailed = session.total > 0 && session.failed >= session.total;
     if (allFailed && !session.hinted) {
       session.hinted = true;
-      showHint("语音暂时不可用");
+      if (session.notAllowed) {
+        showHint("请轻触屏幕以启用声音播放");
+      } else if (session.lastError) {
+        showHint(session.lastError.length > 60 ? session.lastError.slice(0, 60) + "…" : session.lastError);
+      } else {
+        showHint("语音暂时不可用");
+      }
     }
     session.active = false;
     if (autoSessionRef.current === session) autoSessionRef.current = null;
@@ -4141,7 +3491,7 @@ export default function Chat() {
 
       // 4. 流式重写该气泡（复用 askAI，多气泡节奏）。
       //    regenerate: true → 服务端不把这次重放计入情绪、不触发贴纸
-      const { text: replyText } = await askAI(
+      const { text: replyText, networkError } = await askAI(
         history,
         (full) => updateAiStream(regenCk, full),
         { conversationId: currentId, regenerate: true }
@@ -4160,14 +3510,14 @@ export default function Chat() {
         },
       });
       const inserted = res.message;
-      if (!inserted) throw new Error("保存失败");
+      if (!inserted && !networkError) throw new Error("保存失败");
       setMessages((prev) =>
         prev.map((m) =>
-          m.id === msgId ? { ...inserted, ck: regenCk } : m
+          m.id === msgId ? { ...(inserted || m), content: reply, ck: regenCk, isNetworkError: !!networkError } : m
         )
       );
-      patchConversationCacheMessage(currentId, regenCk, inserted);
-      await loadMessageIndex(userId);
+      patchConversationCacheMessage(currentId, regenCk, (inserted || { content: reply, isNetworkError: !!networkError }));
+      await loadMessageIndex();
     } catch (err) {
       console.error("重新生成失败:", err);
       showHint("重新生成失败");
@@ -4302,6 +3652,30 @@ export default function Chat() {
     }
   }
 
+  // 服务端可搜索加密（Searchable Encryption）盲索引命中集合
+  const [remoteHits, setRemoteHits] = useState([]);
+
+  // 按需延迟加载：用户聚焦或输入搜索词时拉取本地索引，同时防抖请求服务端密文盲索引（海量历史毫秒级召回）
+  useEffect(() => {
+    const kw = search.trim();
+    if (kw && messageIndex.length === 0) {
+      void loadMessageIndex();
+    }
+    if (!kw) {
+      setRemoteHits([]);
+      return;
+    }
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiRequest(`/api/user/message-index?q=${encodeURIComponent(kw)}&limit=50`);
+        if (res?.isSearch && Array.isArray(res.items)) {
+          setRemoteHits(res.items);
+        }
+      } catch {}
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [search]);
+
   // 实时过滤：标题或消息内容命中即保留该对话
   const keyword = search.trim().toLowerCase();
   const searchResults = keyword
@@ -4313,11 +3687,14 @@ export default function Chat() {
               m.conversation_id === c.id &&
               (m.content || "").toLowerCase().includes(keyword)
           );
-          if (!titleHit && !hit) return null;
+          const remoteHit = remoteHits.find((r) => r.conversationId === c.id);
+          if (!titleHit && !hit && !remoteHit) return null;
           return {
             conversation: c,
-            messageId: hit?.id || null,
-            snippet: titleHit ? "" : snippetAround(hit.content, keyword),
+            messageId: hit?.id || remoteHit?.id || null,
+            snippet: titleHit
+              ? ""
+              : remoteHit?.snippet || (hit ? snippetAround(hit.content, keyword) : ""),
           };
         })
         .filter(Boolean)
@@ -4332,18 +3709,17 @@ export default function Chat() {
     profile?.username || user?.email?.split("@")[0] || "我";
 
   // AI 头像与聊天背景：读 profiles，设置面板保存后经 setProfile 实时生效
-  const aiAvatarUrl = profile?.ai_avatar_url || "";
   const chatBgUrl = profile?.chat_background_url || "";
-  // AI 气泡底色：有自定义背景图时用独立半透明白底（+轻微毛玻璃）保证文字清晰；
-  // 无背景图时保持原淡灰，在米白底色上外观不变
+  // AI 气泡底色：有自定义背景图时在浅色模式用半透明白底、在深夜模式用高质感深咖微透毛玻璃（+ai-bubble-with-bg 专属暗色保障），杜绝白底白字；
+  // 无背景图时保持温暖羊脂白柔和卡片（暗色下转为温润深咖底板），与全站暗色调严密契合
   const aiBubbleBg = chatBgUrl
-    ? "bg-white/75 backdrop-blur-sm"
-    : "bg-[#f1f3f2]";
+    ? "ai-bubble-with-bg bg-white/85 dark:bg-[#231E1B]/90 backdrop-blur-md"
+    : "bg-[#FFFDFB] dark:bg-[#231E1B]";
   const currentTitle = conversations.find((c) => c.id === currentId)?.title;
 
   // 日记列表：置顶的排最前（不分区），其余保持原有顺序。
   // sort 在现代引擎里是稳定的，所以组内顺序不变。
-  const sortedDiaries = [...diaries].sort(
+  const sortedDiaries = [...diaryTabList].sort(
     (a, b) => (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0)
   );
 
@@ -4357,186 +3733,77 @@ export default function Chat() {
     (d) => d.is_favorited === 1 || d.is_favorited === true
   );
 
-  // 侧边栏内容：桌面内联与小屏抽屉共用
-  const sidebarBody = (
-    <>
-      <button
-        onClick={() => {
-          handleNewConversation();
-          if (isMobile) setIsSidebarOpen(false);
-        }}
-        className={`${btnBase} p-2 mb-2 hover:scale-[1.02]`}
-      >
-        + 新建对话
-      </button>
-
-      <div className="relative mb-2">
-        <svg
-          className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-        >
-          <circle cx="11" cy="11" r="7" />
-          <line x1="20" y1="20" x2="16.2" y2="16.2" />
-        </svg>
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="搜索对话或消息内容"
-          className={searchInputClass}
-        />
-      </div>
-
-      {hint && <p className="text-xs text-slate-500 mb-2">{hint}</p>}
-
-      <div className="flex-1 overflow-y-auto">
-        {conversations.length === 0 && (
-          <p className="text-sm text-slate-400">暂无对话</p>
-        )}
-
-        {/* 多选模式操作栏 */}
-        {multiSelectMode && conversations.length > 0 && (
-          <div className="flex items-center gap-1 mb-2 p-1.5 rounded-lg bg-[#eef1f2] sticky top-0 z-10">
-            <button
-              onClick={handleSelectAll}
-              className={`${btnBase} px-2 py-1 text-xs hover:scale-[1.02]`}
-            >
-              {selectedIds.length === conversations.length ? "取消全选" : "全选"}
-            </button>
-            <button
-              onClick={handleExitMultiSelect}
-              className={`${btnBase} px-2 py-1 text-xs hover:scale-[1.02]`}
-            >
-              取消
-            </button>
-            <span className="text-xs text-slate-400 ml-auto mr-1">
-              已选 {selectedIds.length}
-            </span>
-            <button
-              onClick={handlePinSelected}
-              disabled={selectedIds.length === 0}
-              className={`${btnBase} px-2 py-1 text-xs hover:scale-[1.02]`}
-            >
-              置顶
-            </button>
-            <button
-              onClick={handleDeleteSelected}
-              disabled={selectedIds.length === 0}
-              className="border border-[#e8b4a0] bg-[#f5b8a0] text-white rounded-lg px-2 py-1 text-xs hover:bg-[#f0a48a] disabled:opacity-50 transition-all duration-150"
-            >
-              删除
-            </button>
-          </div>
-        )}
-
-        {/* 搜索模式：扁平列表 */}
-        {keyword && searchResults.length === 0 && (
-          <p className="text-sm text-slate-400">没有匹配的对话</p>
-        )}
-        {keyword &&
-          searchResults.map(({ conversation: c, messageId, snippet }) => (
-            <ConvRow
-              key={c.id}
-              c={c}
-              snippet={snippet}
-              selected={selectedIds.includes(c.id)}
-              multi={multiSelectMode}
-              currentId={currentId}
-              renaming={renamingId === c.id}
-              renameValue={renameValue}
-              menuOpen={menuOpenId === c.id}
-              onOpen={() => {
-                handleOpenResult({ conversation: c, messageId });
-                if (isMobile) setIsSidebarOpen(false);
-              }}
-              onToggleSelect={() => handleToggleSelect(c.id)}
-              onMenu={() => setMenuOpenId(menuOpenId === c.id ? null : c.id)}
-              onRename={() => {
-                setRenamingId(c.id);
-                setRenameValue(c.title || "");
-                setMenuOpenId(null);
-              }}
-              onRenameCommit={() => handleRename(c.id)}
-              onRenameCancel={() => setRenamingId(null)}
-              setRenameValue={setRenameValue}
-              onPin={() => {
-                handleTogglePin(c.id);
-                setMenuOpenId(null);
-              }}
-              onMultiSelect={() => {
-                setMultiSelectMode(true);
-                setMenuOpenId(null);
-              }}
-              onShare={() => {
-                handleShare(c);
-                setMenuOpenId(null);
-              }}
-              onDelete={() => {
-                handleDelete(c.id);
-                setMenuOpenId(null);
-              }}
-              closeMenu={() => setMenuOpenId(null)}
-            />
-          ))}
-
-        {/* 非搜索模式：置顶区 + 时间轴分组 */}
-        {!keyword && conversations.length > 0 && (
-          <ConversationGroups
-            conversations={conversations}
-            multiSelectMode={multiSelectMode}
-            selectedIds={selectedIds}
-            currentId={currentId}
-            renamingId={renamingId}
-            renameValue={renameValue}
-            menuOpenId={menuOpenId}
-            timeGroupLabel={timeGroupLabel}
-            onOpen={(c) => {
-              handleOpenResult({ conversation: c, messageId: null });
-              if (isMobile) setIsSidebarOpen(false);
-            }}
-            onToggleSelect={handleToggleSelect}
-            setMenuOpenId={setMenuOpenId}
-            setRename={setRenameValue}
-            onRename={(c) => {
-              setRenamingId(c.id);
-              setRenameValue(c.title || "");
-              setMenuOpenId(null);
-            }}
-            onRenameCommit={handleRename}
-            onRenameCancel={() => setRenamingId(null)}
-            onPin={handleTogglePin}
-            onMultiSelect={() => {
-              setMultiSelectMode(true);
-              setMenuOpenId(null);
-            }}
-            onShare={handleShare}
-            onDelete={handleDelete}
-          />
-        )}
-      </div>
-    </>
-  );
-
   // 认证检查中：显示加载占位，避免渲染半成品界面或误跳转
   if (authLoading) {
     return (
       <div className="h-screen flex items-center justify-center bg-[#fafaf8]">
         <div className="flex flex-col items-center gap-3">
-          <span className="font-display text-2xl font-bold text-[#5b8aa6]">Solace</span>
+          <img src="/logo.png" alt="Solace" className="w-12 h-12 object-contain animate-pulse" />
+          <img
+            src="/solace-wordmark.png"
+            alt="Solace"
+            className="h-7 w-auto object-contain"
+            style={{ height: "28px", width: "auto" }}
+          />
           <span className="text-sm text-slate-400">加载中…</span>
         </div>
       </div>
     );
   }
 
+  // 带 sessionStorage 实时草稿写入的 setInput 包装
+  function setInputWithDraft(val) {
+    const text = typeof val === "function" ? val(input) : val;
+    setInput(text);
+    try {
+      const key = `solace_chat_draft_${currentId || "new"}`;
+      if (text) {
+        sessionStorage.setItem(key, text);
+      } else {
+        sessionStorage.removeItem(key);
+      }
+    } catch {}
+  }
+
+  // 打开对话切片为陪伴卡片 / 拍立得明信片
+  function handleOpenCompanionCard(mId, directMsg) {
+    const aiMsg =
+      directMsg ||
+      messages.find((m) => String(m.id) === String(mId) || (m.ck && m.ck === mId));
+    if (!aiMsg) return;
+    const idx = messages.findIndex(
+      (m) => m === aiMsg || String(m.id) === String(aiMsg.id) || (m.ck && m.ck === aiMsg.ck)
+    );
+    let userMsg = null;
+    if (idx > 0) {
+      for (let i = idx - 1; i >= 0; i--) {
+        if (messages[i].role === "user") {
+          userMsg = messages[i];
+          break;
+        }
+      }
+    }
+    setCompanionCardData({
+      userContent: userMsg?.content || "",
+      aiContent: aiMsg?.content || "",
+      timestamp: aiMsg?.created_at || Date.now(),
+      conversationTitle: currentTitle || "暖言切片",
+    });
+    setCompanionCardOpen(true);
+  }
+
+  // 晨间暖言小记一键翻开
+  function handleOpenMorningDiary(diaryItem) {
+    setActiveTab("diary");
+    setDiaryTab("ai");
+    handleOpenDiary(diaryItem);
+  }
+
   // 每次渲染刷新气泡内回调，memo 化的气泡通过 ref 读取，始终拿到最新闭包
   bubbleHandlersRef.current = {
     onToggleTts: handleToggleTts,
     onRegenerate: handleRegenerate,
+    onOpenCard: handleOpenCompanionCard,
   };
 
   // ⚠️ 布局高度用 100dvh（动态视口）：移动端浏览器的 100vh 是"地址栏收起后"的高度，
@@ -4545,58 +3812,67 @@ export default function Chat() {
   //    overflow-hidden 锁死外层，滚动全部交给各 tab 内部的滚动容器。
   return (
     <div
-      className="h-screen flex flex-col overflow-hidden bg-[#fafaf8] text-slate-800"
+      className="h-screen flex flex-col overflow-hidden bg-[#FAF7F4] text-slate-800"
       style={{ height: "100dvh" }}
     >
-      {/* 全局桌宠蝴蝶：fixed + z-9999 浮于所有内容之上，可拖动，不随 tab 切换消失。
-          形象 / 尺寸 / 情绪选项 / 话术来自 GET /api/pet（后台「桌宠」页可配）；
-          petConfig?.enabled === false 时后台关了桌宠，直接不渲染。
-          ⚠️ petConfig 还是 null（正在拉）时按"启用"处理 → 先显示默认蓝蝴蝶，
-             配置到了再换成后台配的那张，不会出现"进站看不到宠物"的空窗。 */}
-      {petConfig?.enabled !== false ? (
-        <ButterflyEffect
-          onWantToTalk={handleButterflyTalk}
-          stressData={stressData}
-          butterflyPat={butterflyPat}
-          imageUrl={petConfig?.imageUrl}
-          size={petConfig?.size}
-          moods={petConfig?.moods}
-          lineRepeatHours={petConfig?.lineRepeatHours}
-        />
-      ) : null}
-      {/* 顶部导航栏：左 Logo，右三个标签（固定在页面最上方） */}
-      <header className="h-[60px] shrink-0 flex items-center justify-between px-4 border-b border-[#e8eae7] bg-gradient-to-r from-[#fafaf8] via-[#f2f7fa] to-[#e9f1f7]">
-        {/* 左上角 Logo：点了回首页（宣传页）。
-            ⚠️ 指向 /home 而不是 / —— 已登录用户访问 / 会被重定向回 /chat，
-               那样 Logo 就等于"点不动"了 */}
+      {/* 2D 人形桌宠「暖言」：fixed 浮于内容之上，可拖动。
+          非聊天 Tab 时 tuckToEdge：复用贴边睡眠飞到右缘，避免挡住日记 / 小屋 / 我的的主按钮；
+          切回聊天再飞回隐藏前的位置。详见 components/WarmCompanion.jsx。 */}
+      <WarmCompanion
+        stressData={stressData}
+        aiThinking={sending || pendingReply}
+        tuckToEdge={activeTab !== "chat"}
+      />
+      {/* 顶部导航栏：暖玉瓷白毛玻璃，精致胶囊 Tab 切换 */}
+      <header className="h-[56px] sm:h-[60px] shrink-0 flex items-center justify-between gap-2 px-2.5 sm:px-6 border-b border-[#eee4dc] dark:border-[#332A24] bg-[#FFF9F6]/95 dark:bg-[#1E1A17]/95 backdrop-blur-md z-30 transition-all">
+        {/* 左上角 Logo：超窄屏只显示图标，>=410px 显示图标+文字标，永不重叠 */}
         <button
           type="button"
           onClick={() => {
-            window.location.href = "/home";
+            window.location.href = "/";
           }}
-          className="font-display text-xl font-bold tracking-wide text-[#5b8aa6] select-none transition-opacity duration-150 hover:opacity-75 cursor-pointer"
+          className="flex items-center gap-1.5 sm:gap-2 shrink-0 group select-none cursor-pointer"
           title="回到首页"
         >
-          Solace
+          <img
+            src="/logo.png"
+            alt="Solace Logo"
+            className="w-7 h-7 sm:w-8 sm:h-8 object-contain transition-transform duration-300 group-hover:scale-105 drop-shadow-xs"
+          />
+          <img
+            src="/solace-wordmark.png"
+            alt="Solace"
+            className="h-4 sm:h-5 w-auto object-contain mt-0.5 hidden min-[410px]:block"
+            style={{ width: "auto" }}
+          />
         </button>
-        <nav className="flex items-center h-full">
+
+        {/* 右侧导航 Tab：手机端紧凑自适应，>=380px 展开全称 */}
+        <nav className="flex items-center gap-0.5 sm:gap-1 bg-[#f5ebe3]/65 dark:bg-[#27211E] p-0.5 sm:p-1 rounded-2xl border border-[#efe3d8]/80 dark:border-[#38302A] shrink-0">
           {[
             { id: "chat", icon: "💬", label: "聊天" },
             { id: "diary", icon: "📓", label: "日记" },
-            { id: "firstaid", icon: "🏠", label: "治愈小屋" },
+            { id: "firstaid", icon: "🏠", label: "治愈小屋", shortLabel: "小屋" },
             { id: "profile", icon: "👤", label: "我的" },
           ].map((t) => (
             <button
               key={t.id}
               onClick={() => setActiveTab(t.id)}
-              className={`h-full px-4 flex items-center gap-1.5 text-sm border-b-2 transition-colors duration-150 ${
+              className={`px-2 min-[360px]:px-2.5 sm:px-4 py-1 sm:py-1.5 flex items-center gap-1 sm:gap-1.5 text-xs sm:text-sm rounded-xl transition-all duration-200 cursor-pointer whitespace-nowrap ${
                 activeTab === t.id
-                  ? "text-slate-800 font-medium border-[#5b8aa6]"
-                  : "text-slate-400 border-transparent hover:text-slate-600"
+                  ? "bg-white dark:bg-[#342A24] text-[#b85a3c] dark:text-[#EFA896] font-semibold shadow-xs"
+                  : "text-slate-500 dark:text-[#9A8B83] hover:text-slate-800 dark:hover:text-[#F5DCD3] hover:bg-white/50 dark:hover:bg-white/5"
               }`}
             >
-              <span>{t.icon}</span>
-              {t.label}
+              <span className="text-xs sm:text-sm leading-none shrink-0">{t.icon}</span>
+              {t.shortLabel ? (
+                <>
+                  <span className="hidden min-[380px]:inline">{t.label}</span>
+                  <span className="inline min-[380px]:hidden">{t.shortLabel}</span>
+                </>
+              ) : (
+                <span>{t.label}</span>
+              )}
             </button>
           ))}
         </nav>
@@ -4604,929 +3880,162 @@ export default function Chat() {
 
       {/* 主内容区：随顶部导航切换视图，占满顶栏以下全部空间 */}
       <div className="flex-1 min-h-0">
-        {activeTab === "chat" && (
-          <div className="tab-fade h-full flex">
-            {/* 左侧：会话列表（桌面内联，可折叠） */}
-            {!isMobile && (
-              <div
-                className={`${
-                  isSidebarOpen ? "w-64" : "w-0"
-                } h-full shrink-0 overflow-hidden border-r border-[#e8eae7] bg-[#f7f7f4] transition-all duration-300`}
-              >
-                <div className="w-64 h-full p-2 flex flex-col">
-                  {sidebarBody}
-                </div>
-              </div>
-            )}
-
-            {/* 左侧抽屉（小屏）：顶部 ☰ 按钮唤出 */}
-            {isMobile && isSidebarOpen && (
-              <>
-                <div
-                  className="fixed inset-0 bg-black/30 z-30"
-                  onClick={() => setIsSidebarOpen(false)}
-                />
-                <div className="fixed left-0 top-[60px] bottom-0 w-64 z-40 overflow-y-auto border-r border-[#e8eae7] bg-[#f7f7f4] p-2 flex flex-col">
-                  {sidebarBody}
-                </div>
-              </>
-            )}
-
-            {/* 中间：消息列表 + 输入框 */}
-            <div className="flex-1 h-full flex flex-col min-w-0 relative">
-              {/* 背景图层：独立一层（filter 只作用于图片，不模糊前景），
-                  cover 铺满 + 轻微降饱和，避免抢眼 */}
-              {chatBgUrl && (
-                <div
-                  className="absolute inset-0 pointer-events-none bg-center bg-cover"
-                  style={{
-                    backgroundImage: `url(${chatBgUrl})`,
-                    filter: "blur(0.5px) saturate(0.9)",
-                  }}
-                />
-              )}
-              {/* 暖色（solace-cream）薄遮罩：0.45，让背景图醒目但色调统一；
-                  可读性交给气泡自身的独立半透明背景，不靠加厚遮罩 */}
-              {chatBgUrl && (
-                <div className="absolute inset-0 pointer-events-none bg-[rgba(253,251,247,0.45)]" />
-              )}
-          <div className="relative flex items-center border-b border-[#e8eae7] px-3 py-2">
-            <button
-              onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-              title={isSidebarOpen ? "收起侧边栏" : "展开侧边栏"}
-              className={`${btnBase} px-2 py-1 mr-2 shrink-0 hover:scale-[1.02]`}
-            >
-              ☰
-            </button>
-            <span
-              className="text-[15px] font-semibold text-slate-800 truncate tracking-tight"
-              style={{ textShadow: "0 0 3px rgba(255,255,255,0.95), 0 1px 2px rgba(255,255,255,0.85)" }}
-            >
-              {currentTitle || "Solace"}
-            </span>
-            {profile?.username ? (
-              <span className="text-sm text-slate-600 truncate ml-auto">
-                {displayName}
-              </span>
-            ) : (
-              <span className="ml-auto" />
-            )}
-            {/* 自动播放语音开关：关闭=静音喇叭（带斜杠），开启=正常喇叭。点击区 ≥44px */}
-            <button
-              type="button"
-              onClick={handleToggleAutoPlay}
-              title={autoPlay ? "关闭自动播放语音" : "开启自动播放语音"}
-              aria-label={autoPlay ? "关闭自动播放语音" : "开启自动播放语音"}
-              aria-pressed={autoPlay}
-              className={`${btnBase} w-11 h-11 sm:w-8 sm:h-8 p-0 ml-2 shrink-0 flex items-center justify-center ${
-                autoPlay ? "text-[#7fa8c4]" : "text-slate-400"
-              }`}
-            >
-              {autoPlay ? (
-                <svg
-                  className="w-4 h-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                  <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                </svg>
-              ) : (
-                <svg
-                  className="w-4 h-4"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                  <line x1="23" y1="9" x2="17" y2="15" />
-                  <line x1="17" y1="9" x2="23" y2="15" />
-                </svg>
-              )}
-            </button>
-            {/* 右上角三点菜单：修改 AI 头像 / 修改聊天背景 */}
-            <button
-              onClick={() => setChatMenuOpen((v) => !v)}
-              title="更多"
-              aria-label="更多设置"
-              className={`${btnBase} w-11 h-11 sm:w-auto sm:h-auto sm:px-2 sm:py-1 p-0 ml-2 shrink-0 flex items-center justify-center text-lg leading-none hover:scale-[1.02] ${
-                chatMenuOpen ? "text-[#5b8aa6]" : ""
-              }`}
-            >
-              ⋮
-            </button>
-            {chatMenuOpen && (
-              <>
-                <div
-                  className="fixed inset-0 z-40"
-                  onClick={() => setChatMenuOpen(false)}
-                />
-                <div className="absolute right-2 top-full mt-1 z-50 w-44 bg-white rounded-2xl shadow-xl border border-[#e8eae7] p-1.5 overflow-hidden">
-                  <button
-                    onClick={() => {
-                      setChatMenuOpen(false);
-                      aiAvatarFileRef.current?.click();
-                    }}
-                    className="w-full text-left px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-[#f2f7fa] transition-colors"
-                  >
-                    修改 AI 头像
-                  </button>
-                  <button
-                    onClick={() => {
-                      setChatMenuOpen(false);
-                      bgFileRef.current?.click();
-                    }}
-                    className="w-full text-left px-3 py-2 text-sm text-slate-700 rounded-lg hover:bg-[#f2f7fa] transition-colors"
-                  >
-                    修改聊天背景
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-
-        <div
-          ref={messagesScrollRef}
-          onScroll={handleMessagesScroll}
-          className="relative flex-1 overflow-y-auto px-4 py-4"
-        >
-          {/* 新对话模式的欢迎词：居中、比正文大一号、半透明深灰，
-              叠加在背景图之上且不遮挡它（pointer-events-none）。
-              打字期间仍显示；第一条消息发出（messages 出现气泡）后消失 */}
-          {!currentId &&
-            messages.length === 0 &&
-            !streamingReply &&
-            !diaryReading && (
-              <div className="absolute inset-0 flex items-center justify-center px-6 pointer-events-none">
-                <p className="text-[22px] leading-9 text-slate-800/65 text-center font-medium">
-                  你来啦，今天打算和我分享什么？
-                </p>
-              </div>
-            )}
-
-          {messages.map((m, index) => {
-            const isUser = m.role === "user";
-            // ck 是临时气泡"转正"时保持不变的渲染 key，避免 DOM 卸载导致的闪烁
-            const renderKey = m.ck || m.id;
-            // 正在流式输出的那条（最后一条 AI 气泡）：半截标签先不显示，免得屏幕上一闪而过
-            const holdTagPartial = sending && !isUser && index === messages.length - 1;
-            // AI 消息按 \n 切成多段，模拟真人连发短消息（表情包标记行不算文字）
-            const parsed = isUser ? null : parseStickerMark(m.content);
-            // 朗读标签展示前剥掉（与 MessageRow 共用同一个函数与同一份词表）
-            const displayText =
-              !isUser && ttsTagWords
-                ? stripTtsTags(parsed.text, ttsTagWords, { holdPartial: holdTagPartial })
-                : parsed?.text;
-            const segments = isUser ? [] : splitAiSegments(displayText);
-            const revealed = isUser ? 0 : revealedRef.current[renderKey] ?? segments.length;
-            // 回复里带了表情包标记：挑一张同分类的图（同一条回复固定同一张）
-            const stickerSrc = parsed?.category
-              ? pickSticker(`${renderKey}|${parsed.category}`, parsed.category)
-              : null;
-            return (
-              <MessageRow
-                key={renderKey}
-                m={m}
-                isUser={isUser}
-                renderKey={renderKey}
-                revealed={revealed}
-                stickerSrc={stickerSrc}
-                ttsTagWords={ttsTagWords}
-                holdTagPartial={holdTagPartial}
-                highlighted={highlightId === m.id}
-                aiBubbleBg={aiBubbleBg}
-                aiAvatarUrl={profile?.ai_avatar_url}
-                userAvatarUrl={avatarUrl}
-                displayName={displayName}
-                regenId={regenId}
-                sending={sending}
-                ttsPlayingId={ttsPlayingId}
-                ttsPlayingCk={ttsPlayingCk}
-                ttsLoadingId={ttsLoadingId}
-                handlers={bubbleHandlersRef}
-                messageRefs={messageRefs}
-              />
-            );
-          })}
-
-          {/* 缓存未命中：先用 5 个灰色气泡占位，避免切换对话瞬间白屏 */}
-          {messagesLoading && messages.length === 0 && (
-            <div aria-hidden="true">
-              {["w-40", "w-56", "w-32", "w-48", "w-36"].map((w, i) => (
-                <div
-                  key={w}
-                  className={`flex items-start mb-3 ${
-                    i % 2 === 0 ? "justify-start" : "justify-end"
-                  }`}
-                >
-                  <div className={`${w} h-9 rounded-2xl bg-slate-200/70`} />
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* AI 思考中气泡 */}
-          {pendingReply && (
-            <div className="flex items-start gap-2 mb-3 justify-start">
-              <AiAvatar url={profile?.ai_avatar_url} />
-              <div className={`${aiBubbleBg} px-3 py-2 rounded-2xl rounded-bl-md flex gap-1`}>
-                {[0, 150, 300].map((delay) => (
-                  <span
-                    key={delay}
-                    className="w-1.5 h-1.5 rounded-full bg-slate-400 animate-bounce"
-                    style={{ animationDelay: `${delay}ms` }}
-                  />
-                ))}
-              </div>
-            </div>
-          )}
-
-          <div ref={bottomRef} />
-        </div>
-
-        {/* 首次进入时的 AI 人格选择浮层：只在从未选过、且本地没问过时出现 */}
-        {personaAsking && (
-          <div className="modal-fade fixed inset-0 z-50 flex items-center justify-center bg-black/30 px-6">
-            <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
-              <h3 className="text-base font-bold text-slate-800">想让我以什么身份陪你？</h3>
-              <p className="text-xs text-slate-500 mt-1 leading-relaxed">
-                这是选 <span className="font-medium text-slate-600">AI 的身份</span>，
-                <span className="font-medium text-slate-600">不是选你自己的性别</span>。
-                选一个你觉得舒服的就好，之后随时能在「我的 → 设置 → AI 提示词性别」里换。
-              </p>
-              <div className="flex gap-3 mt-4">
-                <button
-                  type="button"
-                  onClick={() => handlePickPersona("female")}
-                  className="flex-1 p-3 rounded-xl border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 hover:bg-[#e8eff2] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
-                >
-                  <span className="block text-lg">她</span>
-                  <span className="block text-xs text-slate-500 mt-1">温柔的女性朋友</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handlePickPersona("male")}
-                  className="flex-1 p-3 rounded-xl border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 hover:bg-[#e8eff2] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
-                >
-                  <span className="block text-lg">他</span>
-                  <span className="block text-xs text-slate-500 mt-1">温和的男性朋友</span>
-                </button>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setPersonaAsking(false);
-                  try {
-                    localStorage.setItem("solace_persona_asked", "1");
-                  } catch {
-                    // 存储不可用不影响
-                  }
-                }}
-                className="w-full mt-3 text-xs text-slate-400 hover:text-slate-600 transition-colors"
-              >
-                先不选，以后再说
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* 桌宠蝴蝶的默认落点贴着这个容器的上沿（见 components/ButterflyEffect.jsx）：
-            data-chat-input-bar 是它唯一的定位锚点 —— 蝴蝶停在「发送」键正上方，不挡正文 */}
-        <div data-chat-input-bar className="relative px-3 pb-2">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                // 输入法选词中的回车不触发发送
-                if (e.key === "Enter" && !e.nativeEvent.isComposing)
-                  handleSend();
-              }}
-              placeholder="说点什么，说什么都可以"
-              className={inputClass}
+        {/* 聊天视图：常驻 DOM，切 Tab 时用 hidden 隐藏，保留完整的滚动条位置与输入草稿，避免切回时跳到顶端 */}
+        <div className={`h-full flex ${activeTab === "chat" ? "tab-fade" : "hidden"}`}>
+          <div className="h-full flex flex-1 min-w-0">
+            <Sidebar
+              isMobile={isMobile}
+              isSidebarOpen={isSidebarOpen}
+              setIsSidebarOpen={setIsSidebarOpen}
+              conversations={conversations}
+              currentId={currentId}
+              search={search}
+              setSearch={setSearch}
+              searchResults={searchResults}
+              hint={hint}
+              multiSelectMode={multiSelectMode}
+              setMultiSelectMode={setMultiSelectMode}
+              selectedIds={selectedIds}
+              renamingId={renamingId}
+              setRenamingId={setRenamingId}
+              renameValue={renameValue}
+              setRenameValue={setRenameValue}
+              menuOpenId={menuOpenId}
+              setMenuOpenId={setMenuOpenId}
+              handleNewConversation={handleNewConversation}
+              handleSelectAll={handleSelectAll}
+              handleExitMultiSelect={handleExitMultiSelect}
+              handlePinSelected={handlePinSelected}
+              handleDeleteSelected={handleDeleteSelected}
+              handleOpenResult={handleOpenResult}
+              handleToggleSelect={handleToggleSelect}
+              handleRename={handleRename}
+              handleTogglePin={handleTogglePin}
+              handleShare={handleShare}
+              handleDelete={handleDelete}
+              timeGroupLabel={timeGroupLabel}
+              btnBase={btnBase}
+              searchInputClass={searchInputClass}
             />
-            <button
-              onClick={handleSend}
-              disabled={sending}
-              className={`${btnBase} px-4 shrink-0 hover:scale-[1.02]`}
-            >
-              {sending ? "…" : "发送"}
-            </button>
+            <ChatView
+              chatBgUrl={chatBgUrl}
+              isSidebarOpen={isSidebarOpen}
+              setIsSidebarOpen={setIsSidebarOpen}
+              currentTitle={currentTitle}
+              profile={profile}
+              displayName={displayName}
+              autoPlay={autoPlay}
+              handleToggleAutoPlay={handleToggleAutoPlay}
+              chatMenuOpen={chatMenuOpen}
+              setChatMenuOpen={setChatMenuOpen}
+              aiAvatarFileRef={aiAvatarFileRef}
+              bgFileRef={bgFileRef}
+              handleAiAvatarFileChange={handleAiAvatarFileChange}
+              handleBgFileChange={handleBgFileChange}
+              messages={messages}
+              currentId={currentId}
+              birthdayGreet={birthdayGreet}
+              streamingReply={streamingReply}
+              diaryReading={diaryReading}
+              messagesLoading={messagesLoading}
+              pendingReply={pendingReply}
+              sending={sending}
+              setInput={setInputWithDraft}
+              pingWarmInput={pingWarmInput}
+              messagesScrollRef={messagesScrollRef}
+              handleMessagesScroll={handleMessagesScroll}
+              bottomRef={bottomRef}
+              messageRefs={messageRefs}
+              bubbleHandlersRef={bubbleHandlersRef}
+              revealedRef={revealedRef}
+              pickSticker={pickSticker}
+              ttsTagWords={ttsTagWords}
+              highlightId={highlightId}
+              aiBubbleBg={aiBubbleBg}
+              avatarUrl={avatarUrl}
+              regenId={regenId}
+              ttsPlayingId={ttsPlayingId}
+              ttsPlayingCk={ttsPlayingCk}
+              ttsLoadingId={ttsLoadingId}
+              personaAsking={personaAsking}
+              setPersonaAsking={setPersonaAsking}
+              handlePickPersona={handlePickPersona}
+              input={input}
+              handleSend={handleSend}
+              setCallTarget={setCallTarget}
+              btnBase={btnBase}
+              inputClass={inputClass}
+            />
           </div>
-          <p className="text-xs text-slate-400 text-center mt-2">
-            Solace 是你的情绪陪伴者，不能替代专业心理咨询。如果你正经历难以承受的痛苦，请试着联系你信任的人，或拨打全国心理援助热线
-            400-161-9995。
-          </p>
         </div>
-      </div>
-          </div>
-        )}
 
         {/* 治愈小屋页：FirstAid + 性格探索 / 情绪自评，居中窄容器 */}
         {activeTab === "firstaid" && (
           <div className="tab-fade h-full overflow-y-auto px-4 py-8 flex justify-center">
             <div className="w-full max-w-[700px]">
-              <HealingCottage userId={user?.id || user?.userId} onButterflyPatChange={setButterflyPat} />
+              <HealingCottage
+                userId={user?.id || user?.userId}
+                onWantToTalk={() => setActiveTab("chat")}
+              />
             </div>
           </div>
         )}
 
         {/* 日记页：头像 + 昵称 + 个性签名 + 新建 + 列表 */}
         {activeTab === "diary" && (
-          <div className="tab-fade h-full max-w-5xl mx-auto flex flex-col px-4 py-5">
-            {/* 顶部个性化卡片：头像 + 昵称 + 个性签名 */}
-            <div className="flex items-center gap-4 bg-white rounded-2xl shadow-sm border border-[#e8eae7] px-4 py-4 mb-4 shrink-0">
-              {avatarUrl ? (
-                <img
-                  src={avatarUrl}
-                  alt="我"
-                  className="w-[60px] h-[60px] rounded-full object-cover shrink-0"
-                />
-              ) : (
-                <div className="w-[60px] h-[60px] rounded-full bg-gradient-to-br from-[#b6cdd9] to-[#9db5c3] flex items-center justify-center text-white text-xl font-bold shrink-0">
-                  {(displayName || "我").charAt(0).toUpperCase()}
-                </div>
-              )}
-              <div className="min-w-0">
-                <p className="text-base font-bold text-slate-800 truncate">
-                  {profile?.username || "未设置昵称"}
-                </p>
-                <p
-                  onClick={openBioModal}
-                  title="点击修改签名"
-                  className="text-xs text-slate-400 truncate mt-0.5 cursor-pointer hover:text-slate-600 transition-colors duration-150"
-                >
-                  {profile?.bio || "写一句想说的话吧"}
-                </p>
-              </div>
-            </div>
-
-            {/* 双栏：左列表 35% / 右详情 65%，两栏内部独立滚动 */}
-            <div className="flex-1 min-h-0 flex flex-col lg:flex-row gap-4">
-              {/* 左栏：日记列表（小屏仅未选中日记且未在新建时显示） */}
-              {(!isMobile || (!diaryView && !diaryCreating)) && (
-                <div className="w-full lg:w-[35%] shrink-0 flex flex-col min-h-0">
-                  <div className="flex items-center gap-2 shrink-0 mb-3">
-                    <button
-                      onClick={() => {
-                        setDiaryTitle("");
-                        setDiaryContent("");
-                        setDiaryView(null);
-                        setDiaryCreating(true);
-                      }}
-                      className="flex-1 border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-xl py-2.5 text-sm font-medium hover:bg-[#6b98b4] active:scale-[0.99] transition-all duration-150"
-                    >
-                      ＋ 写日记
-                    </button>
-                    {diaries.length > 0 && (
-                      <button
-                        onClick={toggleDiaryMultiMode}
-                        className={`shrink-0 rounded-xl px-3 py-2.5 text-sm border active:scale-[0.98] transition-all duration-150 ${
-                          diaryMultiMode
-                            ? "border-[#a9c6da] bg-[#e3edf3] text-[#4a7f9f]"
-                            : "border-[#d5d9d7] bg-[#fdfdfc] text-slate-600 hover:bg-[#e8eff2]"
-                        }`}
-                      >
-                        {diaryMultiMode ? "取消" : "多选"}
-                      </button>
-                    )}
-                  </div>
-
-                  {/* 多选工具条：全选 / 取消全选 */}
-                  {diaryMultiMode && diaries.length > 0 && (
-                    <div className="flex items-center gap-3 shrink-0 mb-2 px-1">
-                      <button
-                        onClick={toggleDiarySelectAll}
-                        className="text-xs text-[#5b8aa6] hover:text-[#3f6d8a] transition-colors"
-                      >
-                        {selectedDiaryIds.length === diaries.length ? "取消全选" : "全选"}
-                      </button>
-                      <span className="text-xs text-slate-400">共 {diaries.length} 篇</span>
-                    </div>
-                  )}
-
-                  <div className="flex-1 min-h-0 overflow-y-auto space-y-2 pr-1">
-                    {diaries.length === 0 && (
-                      <div className="msg-in text-center py-8">
-                        {/* 线条插画：一页纸 + 一支笔 + 一颗心（品牌蓝 + 暖粉点缀） */}
-                        <svg
-                          width="72"
-                          height="72"
-                          viewBox="0 0 72 72"
-                          fill="none"
-                          aria-hidden="true"
-                          className="mx-auto"
-                        >
-                          <rect
-                            x="14"
-                            y="10"
-                            width="34"
-                            height="46"
-                            rx="4"
-                            stroke="#7fa8c4"
-                            strokeWidth="2"
-                          />
-                          <line
-                            x1="20"
-                            y1="20"
-                            x2="42"
-                            y2="20"
-                            stroke="#7fa8c4"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            opacity="0.45"
-                          />
-                          <line
-                            x1="20"
-                            y1="28"
-                            x2="38"
-                            y2="28"
-                            stroke="#7fa8c4"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            opacity="0.45"
-                          />
-                          <line
-                            x1="20"
-                            y1="36"
-                            x2="40"
-                            y2="36"
-                            stroke="#7fa8c4"
-                            strokeWidth="2"
-                            strokeLinecap="round"
-                            opacity="0.45"
-                          />
-                          <line
-                            x1="43"
-                            y1="57"
-                            x2="58"
-                            y2="29"
-                            stroke="#7fa8c4"
-                            strokeWidth="3"
-                            strokeLinecap="round"
-                          />
-                          <line
-                            x1="58"
-                            y1="29"
-                            x2="61"
-                            y2="22"
-                            stroke="#C98BA4"
-                            strokeWidth="3"
-                            strokeLinecap="round"
-                          />
-                          <path
-                            d="M56 18c-2.8-2.2-4.5-3.9-4.5-6a3.5 3.5 0 0 1 4.5-3.3 3.5 3.5 0 0 1 4.5 3.3c0 2.1-1.7 3.8-4.5 6z"
-                            fill="#C98BA4"
-                            opacity="0.85"
-                          />
-                        </svg>
-                        <p className="text-sm text-slate-400 mt-3">
-                          还没有日记，慢慢写一篇吧。
-                        </p>
-                        {/* 复用「＋ 写日记」的新建逻辑：清空表单并进入新建态 */}
-                        <button
-                          onClick={() => {
-                            setDiaryTitle("");
-                            setDiaryContent("");
-                            setDiaryView(null);
-                            setDiaryCreating(true);
-                          }}
-                          className="mt-4 border border-[#7fa8c4] bg-white text-[#5b8aa6] rounded-lg px-4 py-1.5 text-sm font-medium hover:bg-[#eef4f8] active:scale-[0.98] transition-all duration-150"
-                        >
-                          写第一篇
-                        </button>
-                      </div>
-                    )}
-                    {sortedDiaries.map((d) => {
-                      const selected = diaryView?.id === d.id;
-                      const checked = selectedDiaryIds.includes(d.id);
-                      const pinned = d.is_pinned === 1 || d.is_pinned === true;
-                      const favorited = d.is_favorited === 1 || d.is_favorited === true;
-                      return (
-                        <div
-                          key={d.id}
-                          onClick={() => {
-                            // 多选模式下点击整行 = 勾选，不打开详情
-                            if (diaryMultiMode) {
-                              toggleDiarySelect(d.id);
-                              return;
-                            }
-                            setDiaryCreating(false);
-                            handleOpenDiary(d);
-                          }}
-                          className={`group relative rounded-xl border px-3 py-2.5 cursor-pointer transition-colors duration-150 ${
-                            (diaryMultiMode && checked) || selected
-                              ? "bg-[#e3edf3] border-[#a9c6da]"
-                              : "bg-white border-[#e8eae7] hover:bg-[#f1f5f7]"
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            {/* 多选圆形复选框 */}
-                            {diaryMultiMode && (
-                              <span
-                                className={`w-[18px] h-[18px] rounded-full border-2 flex items-center justify-center shrink-0 transition-all duration-150 ${
-                                  checked
-                                    ? "border-[#7fa8c4] bg-[#7fa8c4]"
-                                    : "border-[#cfd8dd] bg-white"
-                                }`}
-                              >
-                                {checked && (
-                                  <svg
-                                    className="w-3 h-3 text-white"
-                                    viewBox="0 0 24 24"
-                                    fill="none"
-                                    stroke="currentColor"
-                                    strokeWidth="3.5"
-                                  >
-                                    <path
-                                      d="M20 6L9 17l-5-5"
-                                      strokeLinecap="round"
-                                      strokeLinejoin="round"
-                                    />
-                                  </svg>
-                                )}
-                              </span>
-                            )}
-                            <p
-                              className={`text-sm text-slate-700 truncate font-medium flex-1 min-w-0 ${
-                                diaryMultiMode ? "pr-1" : "pr-[76px]"
-                              }`}
-                            >
-                              {d.title}
-                            </p>
-                          </div>
-                          {/* 第二行：**标签在左、正文预览在中、日期在右**。
-                              ⚠️ 两个标签都要显示、而且要分清来源：
-                                 「用户 · 疲惫」是写日记时自己选的，
-                                 「AI · 疲惫」是 AI 读出来的 —— 不区分会显得自相矛盾。
-                              ⚠️ 两个都走 MoodBadge（它内部是白名单，认不出的值直接不渲染）。
-                                 以前这里是把 d.mood 原样打出来，于是后台一次误操作
-                                 留下的「reject」被当成情绪标签显示在了卡片上。 */}
-                          <div className="flex items-center gap-2 mt-1">
-                            <span className="flex shrink-0 items-center gap-1">
-                              <MoodBadge mood={d.user_mood} source="user" />
-                              <MoodBadge mood={d.mood} source="ai" />
-                            </span>
-                            <p className="flex-1 min-w-0 truncate text-xs text-slate-400">
-                              {(d.content || "").slice(0, 30) || "（空）"}
-                              {(d.content || "").length > 30 ? "…" : ""}
-                            </p>
-                            <span className="shrink-0 text-xs text-slate-300">
-                              {formatDateCN(d.diary_date || d.created_at)}
-                            </span>
-                          </div>
-                          {/* 右上角操作：图钉（置顶）/ 星星（收藏）/ 删除。
-                              多选模式下隐藏；未激活的悬停卡片才出现，已激活的常显高亮 */}
-                          {!diaryMultiMode && (
-                          <div className="absolute top-2 right-2 flex items-center gap-0.5">
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleDiaryFlag(d, "is_pinned");
-                              }}
-                              title={pinned ? "取消置顶" : "置顶"}
-                              className={`w-6 h-6 rounded-md flex items-center justify-center transition-all duration-150 ${
-                                pinned
-                                  ? "text-[#7fa8c4] bg-[#eef4f8] opacity-100"
-                                  : "text-slate-300 hover:text-[#7fa8c4] hover:bg-[#eef4f8] opacity-0 group-hover:opacity-100"
-                              }`}
-                            >
-                              <svg
-                                className="w-3.5 h-3.5"
-                                viewBox="0 0 24 24"
-                                fill={pinned ? "currentColor" : "none"}
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              >
-                                <path d="M12 17v5" />
-                                <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a1 1 0 0 0 0-2H8a1 1 0 0 0 0 2h1z" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                toggleDiaryFlag(d, "is_favorited");
-                              }}
-                              title={favorited ? "取消收藏" : "收藏"}
-                              className={`w-6 h-6 rounded-md flex items-center justify-center transition-all duration-150 ${
-                                favorited
-                                  ? "text-[#c68b2e] bg-[#fdf5e4] opacity-100"
-                                  : "text-slate-300 hover:text-[#c68b2e] hover:bg-[#fdf5e4] opacity-0 group-hover:opacity-100"
-                              }`}
-                            >
-                              <svg
-                                className="w-3.5 h-3.5"
-                                viewBox="0 0 24 24"
-                                fill={favorited ? "currentColor" : "none"}
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              >
-                                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2" />
-                              </svg>
-                            </button>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleDeleteDiary(d);
-                              }}
-                              title="删除这篇日记"
-                              className="w-6 h-6 rounded-md flex items-center justify-center text-slate-300 hover:text-red-500 hover:bg-red-50 opacity-0 group-hover:opacity-100 transition-all duration-150"
-                            >
-                              <svg
-                                className="w-3.5 h-3.5"
-                                viewBox="0 0 24 24"
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeLinecap="round"
-                                strokeLinejoin="round"
-                              >
-                                <path d="M3 6h18" />
-                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-                                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                                <line x1="10" y1="11" x2="10" y2="17" />
-                                <line x1="14" y1="11" x2="14" y2="17" />
-                              </svg>
-                            </button>
-                          </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-
-                  {/* 多选底部固定操作栏：未勾选时隐藏 */}
-                  {diaryMultiMode && selectedDiaryIds.length > 0 && (
-                    <div className="shrink-0 mt-2 flex items-center gap-2 px-3 py-2 rounded-xl bg-[#eef1f2] border border-[#e0e6e8]">
-                      <span className="text-xs text-slate-500">
-                        已选中 {selectedDiaryIds.length} 条
-                      </span>
-                      <button
-                        onClick={handlePinSelectedDiaries}
-                        className="ml-auto border border-[#a9c6da] bg-white text-[#4a7f9f] rounded-lg px-2.5 py-1.5 text-xs hover:bg-[#e3edf3] active:scale-[0.98] transition-all duration-150"
-                      >
-                        {selectedDiariesAllPinned ? "取消置顶" : "置顶选中"}
-                      </button>
-                      <button
-                        onClick={handleDeleteSelectedDiaries}
-                        className="border border-[#e8b4a0] bg-[#f5b8a0] text-white rounded-lg px-2.5 py-1.5 text-xs hover:bg-[#f0a48a] active:scale-[0.98] shadow-sm transition-all duration-150"
-                      >
-                        删除选中
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* 右栏：详情 / 编辑 / 新建（小屏仅选中或新建时显示，右上角返回） */}
-              {(!isMobile || diaryView || diaryCreating) && (
-                <div className="w-full lg:flex-1 min-w-0 bg-white rounded-2xl shadow-sm border border-[#e8eae7] p-5 overflow-y-auto relative">
-                  {isMobile && (
-                    <button
-                      onClick={() => {
-                        setDiaryView(null);
-                        setDiaryEdit(false);
-                        setDiaryCreating(false);
-                      }}
-                      className="absolute top-3 right-3 z-10 text-xs text-slate-500 border border-[#e8eae7] bg-[#fafaf8] rounded-lg px-2.5 py-1.5 hover:bg-[#f0f4f6] transition-colors duration-150"
-                    >
-                      ← 返回
-                    </button>
-                  )}
-
-                  {((!isMobile && !diaryView) || diaryCreating) ? (
-                    /* 新建表单（桌面默认 / 小屏点「＋ 写日记」后） */
-                    <div>
-                      <h2 className="text-lg font-bold text-slate-800 mb-3">
-                        写日记
-                      </h2>
-                      <DiaryReleaseZone
-                        onRelease={() => handleDiaryRelease("new")}
-                        isEmpty={() => releaseIsBlank(diaryTitle) && releaseIsBlank(diaryContent)}
-                      >
-                      <input
-                        type="text"
-                        value={diaryTitle}
-                        onChange={(e) => setDiaryTitle(e.target.value)}
-                        placeholder="日记标题"
-                        className={`${inputClass} mb-3`}
-                      />
-                      <textarea
-                        value={diaryContent}
-                        onChange={(e) => setDiaryContent(e.target.value)}
-                        placeholder="今天发生了什么？慢慢写，我在。"
-                        className={`${inputClass} resize-none`}
-                        rows={10}
-                      />
-
-                      {/* 情绪标签（可选）：一行 8 个，从「有点沉」到「轻快」。
-                          ⚠️ 只是让你在固定位置找到相近的词，**不是打分** ——
-                             不选也完全没问题；写完 AI 还会自己读一遍，
-                             那个标签在详情里会标成「AI ·」以示区分。 */}
-                      <div className="mb-3">
-                        <p className="text-xs text-slate-400 mb-1.5">今天的心情（可跳过）</p>
-                        <MoodPicker value={diaryMood} onChange={setDiaryMood} />
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <button
-                          onClick={() => handleSaveDiary(false)}
-                          disabled={savingDiary}
-                          className="border border-[#7fa8c4] bg-white text-[#5b8aa6] rounded-lg py-2.5 text-sm font-medium hover:bg-[#eef4f8] active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150"
-                        >
-                          {savingDiary ? "保存中..." : "保存日记"}
-                        </button>
-                        <button
-                          onClick={() => handleSaveDiary(true)}
-                          disabled={savingDiary}
-                          className="border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-lg py-2.5 text-sm font-medium hover:bg-[#6b98b4] active:scale-[0.99] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150"
-                        >
-                          {savingDiary ? "保存中..." : "保存并发送给 AI"}
-                        </button>
-                      </div>
-                      </DiaryReleaseZone>
-                    </div>
-                  ) : diaryView && diaryEdit ? (
-                    /* 编辑态：标题和正文可编辑 */
-                    <div>
-                      <h2 className="text-lg font-bold text-slate-800 mb-3">
-                        编辑日记
-                      </h2>
-                      <DiaryReleaseZone
-                        onRelease={() => handleDiaryRelease("edit")}
-                        isEmpty={() => releaseIsBlank(diaryEditTitle) && releaseIsBlank(diaryEditContent)}
-                      >
-                      <input
-                        type="text"
-                        value={diaryEditTitle}
-                        onChange={(e) => setDiaryEditTitle(e.target.value)}
-                        placeholder="日记标题"
-                        className={`${inputClass} mb-3`}
-                      />
-                      <textarea
-                        value={diaryEditContent}
-                        onChange={(e) => setDiaryEditContent(e.target.value)}
-                        placeholder="今天发生了什么？慢慢写，我在。"
-                        className={`${inputClass} resize-none`}
-                        rows={10}
-                      />
-                      <div className="mb-3">
-                        <p className="text-xs text-slate-400 mb-1.5">心情标签</p>
-                        <MoodPicker value={diaryEditMood} onChange={setDiaryEditMood} />
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={handleSaveEditDiary}
-                          disabled={savingDiary}
-                          className={`${btnBase} px-4 py-2`}
-                        >
-                          {savingDiary ? "保存中..." : "保存"}
-                        </button>
-                        <button
-                          onClick={() => setDiaryEdit(false)}
-                          className={`${btnBase} px-4 py-2`}
-                        >
-                          取消
-                        </button>
-                      </div>
-                      </DiaryReleaseZone>
-                    </div>
-                  ) : diaryView ? (
-                    /* 详情态：完整标题、日期、正文 */
-                    <div>
-                      {/* ⚠️ 日期以 **diary_date** 为准（它才是"这篇日记写的是哪一天"）。
-                          AI 生成时 created_at 是"生成那一刻"（今天 23 点），
-                          直接拿它显示的话，用户会以为这是今天的日记。 */}
-                      <p className="text-xs text-slate-400 mb-1">
-                        {formatDateCN(diaryView.diary_date || diaryView.created_at)}
-                        {diaryView.source === "ai" ? (
-                          <span className="ml-1 text-slate-300">· 这天的聊天整理</span>
-                        ) : null}
-                      </p>
-                      {/* 标题 + 情绪标签（放标题右侧）。
-                          ⚠️ 两个标签**都显示、并且分清来源**：
-                             「用户 ·」是写的时候自己选的，「AI ·」是 AI 读出来的 ——
-                             不区分的话用户会以为系统自相矛盾。 */}
-                      <div className="flex items-start justify-between gap-2 mb-3">
-                        <h2 className="text-xl font-bold text-slate-800 break-words">
-                          {diaryView.title}
-                        </h2>
-                        <div className="flex shrink-0 flex-wrap justify-end gap-1 pt-1">
-                          {/* ⚠️ AI 生成的日记要**明确标出来**：
-                              用户得知道这篇不是自己写的，否则会产生
-                              "我什么时候写过这个？"的困惑（甚至以为账号被盗）。
-                              徽章里带上具体日期 —— 光写"AI 生成"看不出对应哪天。 */}
-                          {diaryView.source === "ai" ? (
-                            <span
-                              className="rounded-full bg-[#f3f0f8] px-2 py-0.5 text-[11px] text-[#8a7aa8]"
-                              title="这篇是 AI 根据你那天和它聊的内容整理的"
-                            >
-                              AI 生成
-                              {diaryView.diary_date
-                                ? ` · ${String(diaryView.diary_date).slice(5).replace("-", "/")}`
-                                : ""}
-                            </span>
-                          ) : null}
-                          <MoodBadge mood={diaryView.user_mood} source="user" />
-                          <MoodBadge mood={diaryView.mood} source="ai" />
-                        </div>
-                      </div>
-                      <div className="text-sm text-slate-700 leading-7 whitespace-pre-wrap break-words mb-4">
-                        {diaryView.content}
-                      </div>
-                      <div className="flex flex-wrap gap-2 border-t border-[#e8eae7] pt-3">
-                        <button
-                          onClick={() => {
-                            setDiaryEdit(true);
-                            setDiaryEditTitle(diaryView.title || "");
-                            setDiaryEditContent(diaryView.content || "");
-                            setDiaryEditMood(diaryView.user_mood || "");
-                          }}
-                          className={`${btnBase} px-3 py-1.5 text-sm`}
-                        >
-                          编辑
-                        </button>
-                        <button
-                          onClick={() => handleDeleteDiary()}
-                          className={`${btnBase} px-3 py-1.5 text-sm text-red-500 hover:text-red-700`}
-                        >
-                          删除
-                        </button>
-                        <button
-                          onClick={handleReadDiary}
-                          disabled={diaryReading}
-                          className="border border-[#7fa3b8] bg-[#eef4f6] text-slate-700 rounded-lg px-3 py-1.5 text-sm hover:bg-[#e0eaf0] disabled:opacity-50"
-                        >
-                          {diaryReading ? "正在读…" : "让AI读读这篇"}
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          </div>
+          <DiaryTab
+            isMobile={isMobile}
+            avatarUrl={avatarUrl}
+            displayName={displayName}
+            profile={profile}
+            openBioModal={openBioModal}
+            diaryTab={diaryTab}
+            setDiaryTab={setDiaryTab}
+            diaryTabList={diaryTabList}
+            sortedDiaries={sortedDiaries}
+            diaryView={diaryView}
+            setDiaryView={setDiaryView}
+            diaryCreating={diaryCreating}
+            setDiaryCreating={setDiaryCreating}
+            diaryEdit={diaryEdit}
+            setDiaryEdit={setDiaryEdit}
+            diaryMultiMode={diaryMultiMode}
+            setDiaryMultiMode={setDiaryMultiMode}
+            selectedDiaryIds={selectedDiaryIds}
+            setSelectedDiaryIds={setSelectedDiaryIds}
+            toggleDiaryMultiMode={toggleDiaryMultiMode}
+            toggleDiarySelectAll={toggleDiarySelectAll}
+            toggleDiarySelect={toggleDiarySelect}
+            handleOpenDiary={handleOpenDiary}
+            toggleDiaryFlag={toggleDiaryFlag}
+            handleDeleteDiary={handleDeleteDiary}
+            handlePinSelectedDiaries={handlePinSelectedDiaries}
+            handleDeleteSelectedDiaries={handleDeleteSelectedDiaries}
+            selectedDiariesAllPinned={selectedDiariesAllPinned}
+            diaryTitle={diaryTitle}
+            setDiaryTitle={setDiaryTitle}
+            diaryContent={diaryContent}
+            setDiaryContent={setDiaryContent}
+            diaryMood={diaryMood}
+            setDiaryMood={setDiaryMood}
+            savingDiary={savingDiary}
+            handleSaveDiary={handleSaveDiary}
+            handleDiaryRelease={handleDiaryRelease}
+            diaryEditTitle={diaryEditTitle}
+            setDiaryEditTitle={setDiaryEditTitle}
+            diaryEditContent={diaryEditContent}
+            setDiaryEditContent={setDiaryEditContent}
+            diaryEditMood={diaryEditMood}
+            setDiaryEditMood={setDiaryEditMood}
+            handleSaveEditDiary={handleSaveEditDiary}
+            handleReadDiary={handleReadDiary}
+            diaryReading={diaryReading}
+            btnBase={btnBase}
+            inputClass={inputClass}
+          />
         )}
 
-        {/* 回收站弹窗：fixed 定位，放哪里都行，「我的」页和设置页都能打开 */}
-        <TrashModal
-          open={trashOpen}
-          onClose={() => setTrashOpen(false)}
-          apiRequest={apiRequest}
-        />
 
-        {/* 删除方式选择：一个弹窗、三个按钮（删除 / 彻底删除 / 取消） */}
-        <DeleteChoiceModal
-          open={Boolean(deleteAsk)}
-          target={
-            deleteAsk?.kind === "diary"
-              ? "日记"
-              : deleteAsk?.kind === "memory" || deleteAsk?.kind === "memory-batch"
-              ? "记忆"
-              : "内容"
-          }
-          name={deleteAsk?.item?.title || ""}
-          busy={deleteBusy}
-          onCancel={() => setDeleteAsk(null)}
-          onTrash={async () => {
-            const ask = deleteAsk;
-            setDeleteBusy(true);
-            try {
-              if (ask?.kind === "diary") await performDeleteDiary(ask.item, true);
-              if (ask?.kind === "memory") await performDeleteMemory(ask.item, true);
-              if (ask?.kind === "memory-batch")
-                await performDeleteMemoryBatch(ask.item.ids, true);
-            } finally {
-              setDeleteBusy(false);
-              setDeleteAsk(null);
-            }
-          }}
-          onPermanent={async () => {
-            const ask = deleteAsk;
-            setDeleteBusy(true);
-            try {
-              if (ask?.kind === "diary") await performDeleteDiary(ask.item, false);
-              if (ask?.kind === "memory") await performDeleteMemory(ask.item, false);
-              if (ask?.kind === "memory-batch")
-                await performDeleteMemoryBatch(ask.item.ids, false);
-            } finally {
-              setDeleteBusy(false);
-              setDeleteAsk(null);
-            }
-          }}
-        />
 
         {/* 「我的」页：朋友圈风格（主视图） + 设置子视图 */}
         {activeTab === "profile" && profileSubView === "main" && (
@@ -5765,10 +4274,10 @@ export default function Chat() {
         {activeTab === "profile" && profileSubView === "settings" && (
           <div className="tab-fade h-full overflow-y-auto">
             {/* 顶部返回栏（移动端固定） */}
-            <div className="sticky top-0 z-10 bg-[#fafaf8]/90 backdrop-blur border-b border-[#e8eae7] px-4 py-3 flex items-center">
+            <div className="sticky top-0 z-10 bg-[#fafaf8]/90 dark:bg-[#1C1917]/90 backdrop-blur border-b border-[#e8eae7] dark:border-[#332A24] px-4 py-3 flex items-center">
               <button
                 onClick={() => setProfileSubView("main")}
-                className="flex items-center gap-1 text-sm text-slate-600 hover:text-[#5b8aa6] transition-colors"
+                className="flex items-center gap-1 text-sm text-slate-600 dark:text-[#E8D5CC] hover:text-[#5b8aa6] dark:hover:text-[#F5DCD3] transition-colors"
               >
                 <svg
                   className="w-4 h-4"
@@ -5783,15 +4292,15 @@ export default function Chat() {
                 </svg>
                 返回
               </button>
-              <span className="ml-3 text-sm font-medium text-slate-700">设置</span>
+              <span className="ml-3 text-sm font-medium text-slate-700 dark:text-[#F5DCD3]">设置</span>
             </div>
 
             <div className="max-w-xl mx-auto px-4 py-5">
-              <div className="bg-white rounded-2xl shadow-sm border border-[#e8eae7] p-5">
+              <div className="bg-white dark:bg-[#231E1B] rounded-2xl shadow-sm border border-[#e8eae7] dark:border-[#382F28] p-5">
                 <ProfileView
                   user={user}
                   profile={profile}
-                  onSaved={() => user && loadProfile(user.id)}
+                  onSaved={() => user && loadProfile()}
                   bioValue={bioInput}
                   onBioChange={setBioInput}
                   onSaveBio={handleSaveBio}
@@ -5805,7 +4314,7 @@ export default function Chat() {
               {/* 退出登录（移到设置页底部） */}
               <button
                 onClick={() => setSignOutConfirm(true)}
-                className="mt-4 bg-white rounded-2xl shadow-sm border border-[#e8eae7] py-3 w-full text-red-500 text-sm hover:bg-red-50 hover:border-red-200 transition-colors duration-150"
+                className="mt-4 bg-white dark:bg-[#231E1B] rounded-2xl shadow-sm border border-[#e8eae7] dark:border-[#382F28] py-3 w-full text-red-500 dark:text-red-400 text-sm hover:bg-red-50 dark:hover:bg-red-950/20 hover:border-red-200 dark:hover:border-red-900/40 transition-colors duration-150"
               >
                 退出登录
               </button>
@@ -5813,157 +4322,126 @@ export default function Chat() {
           </div>
         )}
 
-        {/* 退出登录二次确认弹窗 */}
-        <ConfirmModal
-          open={signOutConfirm}
-          message="确定要退出当前账号吗？"
-          confirmText="退出登录"
-          onConfirm={async () => {
-            setSignOutConfirm(false);
-            await handleSignOut();
-          }}
-          onClose={() => setSignOutConfirm(false)}
-        />
       </div>
 
-      {/* 统一确认弹窗：删除对话 / 删除日记 */}
-      <ConfirmModal
-        open={!!confirmState}
-        message={confirmState?.message}
-        confirmText={confirmState?.confirmText}
-        onConfirm={confirmState?.onConfirm}
-        onClose={() => setConfirmState(null)}
-      />
-
-      {/* 「我的收藏」弹窗：点击某条切到日记页并打开详情 */}
-      <FavoritesModal
-        open={favoritesOpen}
-        diaries={favDiaries}
-        onClose={() => setFavoritesOpen(false)}
-        onOpenDiary={(d) => {
+      {/* 统一外挂弹窗管理器（ModalManager）：将十多个外挂弹窗、裁剪器及输入控件集中解耦，
+          由 React.memo 隔离，避免聊天打字与流式渲染时的无谓比对 */}
+      <ChatModals
+        trashOpen={trashOpen}
+        setTrashOpen={setTrashOpen}
+        apiRequest={apiRequest}
+        deleteAsk={deleteAsk}
+        deleteBusy={deleteBusy}
+        setDeleteAsk={setDeleteAsk}
+        handleDeleteChoiceTrash={async () => {
+          const ask = deleteAsk;
+          setDeleteBusy(true);
+          try {
+            if (ask?.kind === "diary") await performDeleteDiary(ask.item, true);
+            if (ask?.kind === "memory") await performDeleteMemory(ask.item, true);
+            if (ask?.kind === "memory-batch") await performDeleteMemoryBatch(ask.item.ids, true);
+          } finally {
+            setDeleteBusy(false);
+            setDeleteAsk(null);
+          }
+        }}
+        handleDeleteChoicePermanent={async () => {
+          const ask = deleteAsk;
+          setDeleteBusy(true);
+          try {
+            if (ask?.kind === "diary") await performDeleteDiary(ask.item, false);
+            if (ask?.kind === "memory") await performDeleteMemory(ask.item, false);
+            if (ask?.kind === "memory-batch") await performDeleteMemoryBatch(ask.item.ids, false);
+          } finally {
+            setDeleteBusy(false);
+            setDeleteAsk(null);
+          }
+        }}
+        signOutConfirm={signOutConfirm}
+        setSignOutConfirm={setSignOutConfirm}
+        handleSignOut={handleSignOut}
+        confirmState={confirmState}
+        setConfirmState={setConfirmState}
+        favoritesOpen={favoritesOpen}
+        setFavoritesOpen={setFavoritesOpen}
+        favDiaries={favDiaries}
+        handleOpenFavDiary={(d) => {
           setFavoritesOpen(false);
           setActiveTab("diary");
           setDiaryCreating(false);
           handleOpenDiary(d);
         }}
-      />
-
-      {/* 「记忆库」弹窗：查看 / 新增 / 删除长期记忆 */}
-      <MemoriesModal
-        open={memoriesOpen}
+        memoriesOpen={memoriesOpen}
+        setMemoriesOpen={setMemoriesOpen}
         memories={memories}
-        loading={memoriesLoading}
-        onClose={() => setMemoriesOpen(false)}
-        onAdd={addMemory}
-        onDelete={deleteMemory}
-        onDeleteMany={deleteMemoryBatch}
-      />
-
-      {/* ---- 压力评估：右上角的读数 + 提醒卡片 ----
-          ⚠️ 两个都挂在**最外层**，这样切 tab（聊天 / 日记 / 治愈小屋）时都在 ——
-             用户不会因为换个页面就"丢了"自己的状态，也不会在这里看过了、
-             到那边又被问一遍。
-          ⚠️ RelaxPopup 只负责"要不要做"；真正做放松还是走「治愈小屋」那套
-             组件（呼吸 / 蝴蝶拍），不重复实现。 */}
-      <StressMeter api={apiRequest} onPendingPopup={setStressPopup} onData={setStressData} />
-      <RelaxPopup
-        popup={stressPopup}
-        onRespond={respondStressPopup}
-        onDone={() => setStressPopup(null)}
-        api={apiRequest}
-      />
-
-      {/* 聊天背景裁剪弹窗：可在横屏 16:9 / 竖屏 9:16 间切换，默认横屏 */}
-      {bgCropSrc && (
-        <ImageCropper
-          imageSrc={bgCropSrc}
-          cropShape="rect"
-          title="裁剪聊天背景"
-          maxSide={1280}
-          busy={uploadingBg}
-          aspectOptions={[
-            { label: "横屏 16:9", value: 16 / 9 },
-            { label: "竖屏 9:16", value: 9 / 16 },
-          ]}
-          onCancel={() => setBgCropSrc(null)}
-          onConfirm={handleBgCropped}
-        />
-      )}
-
-      {/* AI 头像裁剪弹窗：圆形 1:1 */}
-      {aiAvatarCropSrc && (
-        <ImageCropper
-          imageSrc={aiAvatarCropSrc}
-          aspect={1}
-          cropShape="round"
-          title="裁剪 AI 头像"
-          maxSide={512}
-          busy={uploadingAvatar}
-          onCancel={() => setAiAvatarCropSrc(null)}
-          onConfirm={handleAiAvatarCropped}
-        />
-      )}
-
-      {/* 我的页封面头像裁剪弹窗：圆形 1:1（复用共享 hook） */}
-      {coverAvatar.cropSrc && (
-        <ImageCropper
-          imageSrc={coverAvatar.cropSrc}
-          aspect={1}
-          cropShape="round"
-          title="裁剪头像"
-          maxSide={512}
-          busy={coverAvatar.uploading}
-          onCancel={() => coverAvatar.setCropSrc(null)}
-          onConfirm={coverAvatar.handleCropped}
-        />
-      )}
-
-      {/* 我的页封面背景裁剪弹窗：16:9 / 9:16 可切换（复用共享 hook） */}
-      {coverBg.cropSrc && (
-        <ImageCropper
-          imageSrc={coverBg.cropSrc}
-          cropShape="rect"
-          title="裁剪封面"
-          maxSide={1280}
-          aspectOptions={[
-            { label: "横屏 16:9", value: 16 / 9 },
-            { label: "竖屏 9:16", value: 9 / 16 },
-          ]}
-          busy={coverBg.uploading}
-          onCancel={() => coverBg.setCropSrc(null)}
-          onConfirm={coverBg.handleCropped}
-        />
-      )}
-
-      {/* 个性签名编辑弹窗（日记页顶部卡片唤出，保存逻辑共用 handleSaveBio） */}
-      <BioModal
-        open={bioModalOpen}
-        value={bioInput}
-        onChange={setBioInput}
-        saving={savingBio}
-        msg={bioMsg}
-        onSave={handleSaveBio}
-        onClose={() => setBioModalOpen(false)}
-      />
-
-      {/* 「关于 Solace」弹窗 */}
-      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
-
-      {/* 三点菜单的隐藏 file input：常驻渲染（不在任何条件块内），
-          避免菜单关闭时 input 被卸载导致选图后 change 事件丢失 */}
-      <input
-        ref={bgFileRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={handleBgFileChange}
-      />
-      <input
-        ref={aiAvatarFileRef}
-        type="file"
-        accept="image/*"
-        className="hidden"
-        onChange={handleAiAvatarFileChange}
+        memoriesLoading={memoriesLoading}
+        memoryTotal={memoryTotal}
+        memoryTruncated={memoryTruncated}
+        addMemory={addMemory}
+        updateMemory={updateMemory}
+        restoreMemory={restoreMemory}
+        deleteMemory={deleteMemory}
+        handleTalkAboutMemory={(m) => {
+          if (!m?.content) return;
+          setMemoriesOpen(false);
+          setActiveTab("chat");
+          const intro =
+            m.category === "wish"
+              ? `我想和你聊聊我的心愿：“${m.content}”，你还记得吗？`
+              : m.category === "preference"
+              ? `今天突然想到你记下的：“${m.content}”，想找你说说话~`
+              : `我想和你聊聊关于“${m.content}”这件事…`;
+          setInput(intro);
+          pingWarmInput();
+        }}
+        handleWriteDiaryFromMemory={(m) => {
+          if (!m?.content) return;
+          setMemoriesOpen(false);
+          setActiveTab("diary");
+          setDiaryView(null);
+          setDiaryEdit(false);
+          setDiaryCreating(true);
+          const shortTitle = m.content.length > 14 ? m.content.slice(0, 14) + "…" : m.content;
+          setDiaryTitle(`关于「${shortTitle}」的心境`);
+          setDiaryContent(`今天又回想起了这颗记忆星芒：\n“${m.content}”\n\n写在这里，静静珍藏。\n`);
+          setDiaryMood(m.category === "wish" || m.category === "emotion" ? "安稳" : "平静");
+        }}
+        stressPopup={stressPopup}
+        setStressPopup={setStressPopup}
+        setStressData={setStressData}
+        stressPing={stressPing}
+        respondStressPopup={respondStressPopup}
+        bgCropSrc={bgCropSrc}
+        setBgCropSrc={setBgCropSrc}
+        uploadingBg={uploadingBg}
+        handleBgCropped={handleBgCropped}
+        aiAvatarCropSrc={aiAvatarCropSrc}
+        setAiAvatarCropSrc={setAiAvatarCropSrc}
+        uploadingAvatar={uploadingAvatar}
+        handleAiAvatarCropped={handleAiAvatarCropped}
+        coverAvatar={coverAvatar}
+        coverBg={coverBg}
+        bioModalOpen={bioModalOpen}
+        setBioModalOpen={setBioModalOpen}
+        bioInput={bioInput}
+        setBioInput={setBioInput}
+        savingBio={savingBio}
+        bioMsg={bioMsg}
+        handleSaveBio={handleSaveBio}
+        aboutOpen={aboutOpen}
+        setAboutOpen={setAboutOpen}
+        callTarget={callTarget}
+        setCallTarget={setCallTarget}
+        diaries={diaries}
+        activeTab={activeTab}
+        handleOpenMorningDiary={handleOpenMorningDiary}
+        companionCardOpen={companionCardOpen}
+        setCompanionCardOpen={setCompanionCardOpen}
+        companionCardData={companionCardData}
+        bgFileRef={bgFileRef}
+        handleBgFileChange={handleBgFileChange}
+        aiAvatarFileRef={aiAvatarFileRef}
+        handleAiAvatarFileChange={handleAiAvatarFileChange}
       />
     </div>
   );

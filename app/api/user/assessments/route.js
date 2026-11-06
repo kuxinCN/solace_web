@@ -18,6 +18,7 @@ export const dynamic = "force-dynamic";
 // type 白名单（POST 只允许这两种；量表结果走 /api/user/scales 提交）
 const VALID_TYPES = new Set(["personality", "emotion"]);
 const MAX_RECORDS = 100; // 最多返回 100 条，避免拉太多
+const MAX_TYPE_CHARS = 64; // 与 assessment_results.type 列宽一致（自定义量表 id 最长 63）
 
 /** 提交一条测评结果 */
 export async function POST(request) {
@@ -25,7 +26,7 @@ export async function POST(request) {
   if (!user) return jsonError("请先登录", 401);
 
   const body = await readJsonBody(request);
-  const type = cleanString(body.type, 16);
+  const type = cleanString(body.type, MAX_TYPE_CHARS);
   if (!VALID_TYPES.has(type)) {
     return jsonError("未知的测评类型", 400);
   }

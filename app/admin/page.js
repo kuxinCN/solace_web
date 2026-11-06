@@ -6,7 +6,6 @@ import ContentReviewPanel from "@/components/ContentReviewPanel";
 import DiaryTaskPanel from "@/components/DiaryTaskPanel";
 import FloatingAlert from "@/components/FloatingAlert";
 import KeywordManager from "@/components/KeywordManager";
-import PetPanel from "@/components/PetPanel";
 import StickerPanel from "@/components/StickerPanel";
 import PortraitPanel from "@/components/PortraitPanel";
 import ScaleManagerPanel from "@/components/ScaleManagerPanel";
@@ -15,15 +14,15 @@ import StressDiagnosePanel from "@/components/StressDiagnosePanel";
 /* ------------------------------------------------------------------ 样式 */
 
 const inputClass =
-  "w-full border border-[#d5d9d7] bg-white px-2 py-1.5 text-sm text-gray-800 placeholder-gray-400 rounded-lg transition-colors duration-150 focus:outline-none focus:border-[#8fb3c7] focus:ring-1 focus:ring-[#8fb3c7]";
+  "w-full border border-[#ebe3dc] bg-white px-3.5 py-2 text-sm text-slate-800 placeholder-slate-400 rounded-xl transition-all duration-150 focus:outline-none focus:border-[#e2a68c] focus:ring-2 focus:ring-[#e2a68c]/20 shadow-2xs";
 
 const btnBase =
-  "border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 rounded-lg px-3 py-1.5 text-sm hover:bg-[#e8eff2] hover:text-slate-900 active:bg-[#dbe6ea] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed";
+  "border border-[#ebe3dc] bg-[#FAF8F5] text-slate-700 rounded-xl px-3.5 py-2 text-sm font-medium hover:bg-white hover:text-slate-900 hover:border-[#dfd6ce] active:bg-[#f3ebe4] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs cursor-pointer";
 
 const btnPrimary =
-  "border border-[#7fa3b8] bg-[#7fa3b8] text-white rounded-lg px-3 py-1.5 text-sm hover:bg-[#6c93a8] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed";
+  "border border-[#b85a3c] bg-gradient-to-r from-[#c06b50] to-[#b85a3c] text-white rounded-xl px-4 py-2 text-sm font-medium hover:from-[#b05f45] hover:to-[#a84f33] active:scale-[0.98] transition-all duration-150 shadow-sm shadow-[#b85a3c]/15 disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer";
 
-const cardClass = "bg-white border border-[#e5e7e4] rounded-xl p-4";
+const cardClass = "bg-white border border-[#eee4dc] rounded-2xl p-5 shadow-xs transition-shadow duration-200 hover:shadow-sm";
 
 /* -------------------------------------------------------------- API 封装 */
 
@@ -72,32 +71,49 @@ const FIELDS = {
       label: "模型名",
       type: "datalist",
       optionsKey: "aiModels",
-      hint: "可以点下方「拉取可用模型」自动获取后选择，也可以直接手动输入。例：glm-4-flash、deepseek-chat、gpt-4o-mini",
+      hint: "可以点下方「拉取可用模型」自动获取后选择，也可以直接手动输入。例：deepseek-v4.1-flash-1017、deepseek-chat、glm-4-flash",
     },
     { key: "temperature", label: "温度（0-2）", type: "number", step: "0.1" },
     { key: "maxTokens", label: "最大回复长度", type: "number" },
     { key: "timeoutSeconds", label: "超时（秒）", type: "number" },
+    {
+      key: "timeSource",
+      label: "时间感知基准",
+      type: "select",
+      options: [
+        { value: "client", label: "用户设备本地时间（推荐，精准感知用户时区与作息）" },
+        { value: "server", label: "服务器时间（以服务端当前系统时钟为准）" },
+      ],
+      hint: "向 AI 注入当前年月日、星期几、时间与时段（深夜/清晨/下午等）。选用户本地时间可避免跨时区偏差。",
+    },
     { key: "provider", label: "服务商备注", type: "text", hint: "仅作记录，不影响调用" },
     {
       key: "systemPrompt",
-      label: "AI 提示词（默认人设）",
+      label: "AI 人设模块（默认中性）",
       type: "textarea",
-      rows: 12,
-      hint: "用户还没选择人格时用这一份。保存后立即生效，不用重启服务。留空则使用前端自带的提示词。",
+      rows: 8,
+      hint: "只需定义中性挚友的 Role、核心陪伴策略与口吻；公共底座（红线、微信气泡短句、禁思考链）会自动在后端拼接追加。留空使用内置出厂人设。",
     },
     {
       key: "systemPromptMale",
-      label: "AI 提示词（男性人格）",
+      label: "AI 人设模块（男性老友）",
       type: "textarea",
-      rows: 12,
-      hint: "用户在「我的 → 设置」或聊天输入框旁选「他」时用这份。留空则回退到默认人设。",
+      rows: 8,
+      hint: "用户选「他」时生效。只需定义沉稳老兄弟的定位与口吻风格，公共底座会自动拼接。留空回退默认人设。",
     },
     {
       key: "systemPromptFemale",
-      label: "AI 提示词（女性人格）",
+      label: "AI 人设模块（女性闺蜜）",
       type: "textarea",
-      rows: 12,
-      hint: "用户选「她」时用这份。留空则回退到默认人设。",
+      rows: 8,
+      hint: "用户选「她」时生效。只需定义温柔知心闺蜜的定位与口吻风格，公共底座会自动拼接。留空回退默认人设。",
+    },
+    {
+      key: "systemPromptBase",
+      label: "公共规则底座（红线与气泡铁律）",
+      type: "textarea",
+      rows: 8,
+      hint: "所有性别人格共用的底座模块（包含不诊断、不说教、微信气泡短句换行、禁思维链、记忆标记等）。留空则使用内置出厂标准底座。",
     },
     {
       key: "diaryPrompt",
@@ -333,63 +349,160 @@ const FIELDS = {
       options: [
         { value: "openai-compatible", label: "OpenAI 兼容（POST /audio/speech，接口直接返回音频）" },
         { value: "mimo-chat", label: "小米 MiMo（POST /chat/completions，音频是 base64）" },
+        { value: "dashscope-qwen", label: "阿里云百炼 DashScope / Qwen（qwen-audio-3.1-tts-flash，支持方言与声音事件）" },
       ],
-      hint: "不同服务商的接口格式不一样，选错了会报 400 / Invalid request",
+      hint: "不同服务商的接口格式与能力不同，切换接口类型后，下方会自动切换匹配的配置项与推荐值",
     },
     {
       key: "baseUrl",
       label: "接口地址",
       type: "text",
-      hint: "两种填法都行：只填 https://api.xiaomimimo.com/v1 ，或直接粘官方文档里的完整地址 https://api.xiaomimimo.com/v1/chat/completions 。注意别填成文档网页地址（mimo.mi.com/docs/...）。OpenAI 系填 https://api.openai.com/v1",
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "百炼可填 Base 地址 https://dashscope.aliyuncs.com/api/v1 或专有网关（程序会自动补齐 SpeechSynthesizer 路径；直接填完整端点亦可）";
+        }
+        if (provider.includes("mimo")) {
+          return "小米 MiMo 填 https://api.xiaomimimo.com/v1（注意别填成控制台或文档网页地址）";
+        }
+        return "OpenAI 系填 https://api.openai.com/v1，或兼容转发网关地址";
+      },
     },
-    { key: "apiKey", label: "API Key", type: "secret", hint: "小米 MiMo 走 api-key 请求头、其他走 Bearer，程序会按接口类型自动处理" },
-    { key: "model", label: "模型名", type: "text", hint: "小米 MiMo 填 mimo-v2.5-tts ；OpenAI 系填 tts-1 之类" },
+    {
+      key: "apiKey",
+      label: "API Key",
+      type: "secret",
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "阿里云百炼 API Key（DashScope 控制台获取，形如 sk-xxx，请求时走 Bearer 头）";
+        }
+        if (provider.includes("mimo")) {
+          return "小米 MiMo API Key（请求时走 api-key 头，程序自动处理）";
+        }
+        return "OpenAI API Key 或第三方中转 Key（走 Bearer 头）";
+      },
+    },
+    {
+      key: "model",
+      label: "模型名",
+      type: "text",
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "百炼推荐填 qwen-audio-3.1-tts-flash（低延迟拟真流式合成）或 cosyvoice-v1";
+        }
+        if (provider.includes("mimo")) {
+          return "小米 MiMo 填 mimo-v2.5-tts";
+        }
+        return "OpenAI 填 tts-1 或 tts-1-hd";
+      },
+    },
     {
       key: "voice",
       label: "默认音色",
       type: "text",
-      hint: "用户还没选 AI 人格时用这个。小米 MiMo：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦 / Mia / Chloe / Milo / Dean ；OpenAI：alloy 等",
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "用户未选人格时使用。百炼推荐：longanhuan_v3.1（支持多语种方言）或 Cherry 等";
+        }
+        if (provider.includes("mimo")) {
+          return "用户未选人格时使用。小米 MiMo：mimo_default / 冰糖 / 茉莉 / 苏打 / 白桦";
+        }
+        return "默认音色，如 alloy / echo / fable / onyx / nova / shimmer";
+      },
     },
     {
       key: "voiceFemale",
       label: "女性人格音色",
       type: "text",
-      hint: "用户在「我的 → 设置」选了 AI 人格「她」之后，朗读用这个音色 —— 不然给女性人设配个男声会很出戏。留空则回退到「默认音色」。小米 MiMo 常见女声：冰糖 / 茉莉 / Mia / Chloe",
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "用户在「我的 → 设置」选了 AI 人格「她」之后使用。百炼推荐：longanhuan_v3.1 / Cherry";
+        }
+        if (provider.includes("mimo")) {
+          return "用户选「她」时使用。小米 MiMo 常见女声：冰糖 / 茉莉 / Mia / Chloe";
+        }
+        return "女性人设朗读音色，留空则回退到默认音色";
+      },
     },
     {
       key: "voiceMale",
       label: "男性人格音色",
       type: "text",
-      hint: "用户选了 AI 人格「他」之后用这个。留空则回退到「默认音色」。小米 MiMo 常见男声：苏打 / 白桦 / Milo / Dean",
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "用户选了 AI 人格「他」之后使用。百炼推荐：longxiaochun_v3.1 / longwan";
+        }
+        if (provider.includes("mimo")) {
+          return "用户选「他」时使用。小米 MiMo 常见男声：苏打 / 白桦 / Milo / Dean";
+        }
+        return "男性人设朗读音色，留空则回退到默认音色";
+      },
     },
-    { key: "speed", label: "语速（0.5-2）", type: "number", step: "0.1", hint: "仅 OpenAI 兼容接口支持，小米 MiMo 接口会忽略它" },
-    { key: "format", label: "音频格式", type: "text", hint: "常用 mp3 ；小米 MiMo 支持 wav / mp3 / pcm" },
+    {
+      key: "speed",
+      label: "语速（0.5-2）",
+      type: "number",
+      step: "0.1",
+      condition: ({ provider }) => !provider.includes("mimo"),
+      hint: "OpenAI 与 阿里云百炼 原生支持语速调节；小米 MiMo 会忽略本项",
+    },
+    {
+      key: "format",
+      label: "音频格式",
+      type: "text",
+      hint: "常用 mp3 ；百炼支持 mp3 / wav / pcm / opus ；MiMo 支持 wav / mp3 / pcm",
+    },
     {
       key: "stylePrompt",
-      label: "朗读风格指令（仅小米 MiMo 生效）",
+      label: ({ provider }) =>
+        provider.includes("dashscope") || provider.includes("qwen")
+          ? "风格与方言指令（Instruction，支持方言）"
+          : "朗读风格指令（仅小米 MiMo 生效）",
       type: "textarea",
       rows: 3,
-      hint: "用自然语言描述想要的语气，会作为 user 消息发给 MiMo（例如：用温柔、缓慢、轻声细语的语调朗读）。留空则不发送；OpenAI 兼容协议会忽略这项。",
+      condition: ({ provider }) =>
+        provider.includes("mimo") || provider.includes("dashscope") || provider.includes("qwen"),
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "百炼原生指令控制：用自然语言描述情感、语气或方言口音，如：“用温柔、舒缓的语气朗读” 或 “请用地道的四川话/粤语朗读”。留空则按模型默认输出。";
+        }
+        return "用自然语言描述想要的语气，会作为 user 消息发给 MiMo（例如：用温柔、缓慢、轻声细语的语调朗读）。";
+      },
     },
     {
       key: "styleTags",
-      label: "朗读标签（情绪 / 声音事件，仅小米 MiMo 生效）",
+      label: ({ provider }) =>
+        provider.includes("dashscope") || provider.includes("qwen")
+          ? "朗读标签与声音事件（支持情绪与叹气/笑声等事件）"
+          : "朗读标签（情绪 / 声音事件，仅小米 MiMo 生效）",
       type: "boolean",
-      hint: "开着时，AI 会在回复里自然带上 [温柔]、(叹气) 这类标签，MiMo 朗读时按标签控语气；用户看到的气泡里这些标签会被自动去掉（存库保留原文，供朗读用）。⚠️ 接口类型不是「小米 MiMo」时本项自动失效：标签既不会被生成，历史消息里的旧标签也会在朗读前被剥掉（否则会被一字一顿念出来）。想彻底关掉就用这个开关。",
+      condition: ({ provider }) =>
+        provider.includes("mimo") || provider.includes("dashscope") || provider.includes("qwen"),
+      hint: ({ provider }) => {
+        if (provider.includes("dashscope") || provider.includes("qwen")) {
+          return "开启后，AI 回复时会适度内嵌 [开心]、[叹气]、[笑] 等情绪或非言语事件标签，Qwen 合成时能精准呈现叹气、轻笑等细粒度情感；前端展示会自动剥离标签。";
+        }
+        return "开启后，AI 会在回复里自然带上 [温柔]、(叹气) 这类标签，MiMo 朗读时按标签控语气；前端展示会自动剥离标签。";
+      },
     },
     {
       key: "styleTagWords",
-      label: "语气标签词表（仅小米 MiMo）",
+      label: "语气 / 情绪标签词表",
       type: "textarea",
       rows: 5,
-      hint: "一份词表两处用：① 提示词里告诉 AI 只能从这些词里选；② 用户端剥离标签的白名单。默认 = 官方推荐表（基础情绪 / 复合情绪 / 整体语调 / 音色定位 / 人设腔调 / 方言 / 角色扮演 / 唱歌）。逗号分隔。⚠️ 清空 = 恢复默认值，别用清空来关功能；⚠️ 删掉某个词 = AI 不再用它、用户端也不再剥它（会漏到屏幕上），所以缩表要谨慎。",
+      condition: ({ provider, getValue }) =>
+        (provider.includes("mimo") || provider.includes("dashscope") || provider.includes("qwen")) &&
+        Boolean(getValue("styleTags")),
+      hint: "一份词表两处用：① 提示词里告诉 AI 只能从这些词里选；② 用户端剥离标签的白名单。逗号分隔。清空 = 恢复默认值。",
     },
     {
       key: "eventTagWords",
-      label: "声音事件词表（仅小米 MiMo）",
+      label: "声音事件词表（叹气 / 笑声 / 呼吸等）",
       type: "textarea",
       rows: 5,
-      hint: "同上（吸气 / 深呼吸 / 叹气 / 轻笑 / 哽咽 ……）。官方推荐表里没有、但官方样例里出现过的词（苦笑、沉默、停顿、小声 之类）很实用 —— 想让 AI 也能用、并且用户端也能剥掉，就往这里加（逗号分隔）。",
+      condition: ({ provider, getValue }) =>
+        (provider.includes("mimo") || provider.includes("dashscope") || provider.includes("qwen")) &&
+        Boolean(getValue("styleTags")),
+      hint: "声音事件词表（吸气 / 深呼吸 / 叹气 / 轻笑 / laughing / sighing 等）。逗号分隔。清空 = 恢复默认值。",
     },
     { key: "timeoutSeconds", label: "超时（秒）", type: "number" },
   ],
@@ -635,24 +748,30 @@ const FIELDS = {
 };
 
 const TABS = [
-  { id: "overview", label: "概览" },
-  { id: "database", label: "数据库" },
-  { id: "ai", label: "对话 AI" },
-  { id: "tts", label: "语音 TTS" },
-  // ⚠️ 这一页现在管两件事：内容安全（别人能看到的内容）+ 压力评估（用户自己的状态），
-  //    所以名字也改了 —— 原来的「内容安全」已经盖不住它。
-  { id: "safety", label: "内容安全与压力" },
-  { id: "review", label: "数据审核" },
-  { id: "diary", label: "日记" },
-  { id: "music", label: "背景音乐" },
-  { id: "pet", label: "桌宠" },
-  { id: "sticker", label: "表情包" },
-  { id: "mail", label: "邮箱 / 验证码" },
-  { id: "users", label: "用户管理" },
-  { id: "userdata", label: "用户数据" },
-  { id: "scales", label: "量表题库" },
-  { id: "site", label: "站点信息" },
-  { id: "logs", label: "操作日志" },
+  { id: "overview", label: "系统概览", icon: "📊", group: "data", desc: "运行状态与聚合指标" },
+  { id: "users", label: "用户管理", icon: "👥", group: "data", desc: "账号列表与状态管理" },
+  { id: "logs", label: "操作日志", icon: "📜", group: "data", desc: "敏感操作安全审计" },
+
+  { id: "ai", label: "对话 AI", icon: "💬", group: "ai", desc: "主模型与提示词人设" },
+  { id: "tts", label: "语音 TTS", icon: "🎙️", group: "ai", desc: "MiMo 语音与音效标签" },
+  { id: "review", label: "数据审核", icon: "🛡️", group: "ai", desc: "内容异步审核与处置" },
+  { id: "diary", label: "日记任务", icon: "📖", group: "ai", desc: "零点暖言小记生成调度" },
+
+  { id: "safety", label: "内容安全与压力", icon: "🔒", group: "content", desc: "违规词过滤与压力规则" },
+  { id: "scales", label: "量表题库", icon: "📋", group: "content", desc: "标准化测评题目与方案" },
+  { id: "music", label: "背景音乐", icon: "🎵", group: "content", desc: "本地歌单与网易云外链" },
+  { id: "sticker", label: "表情包库", icon: "🏷️", group: "content", desc: "分类素材与情绪自动配图" },
+
+  { id: "database", label: "数据库运维", icon: "🗄️", group: "system", desc: "连接池、数据备份与升级" },
+  { id: "mail", label: "邮箱 / SMTP", icon: "✉️", group: "system", desc: "验证码与通知发信通道" },
+  { id: "site", label: "站点信息", icon: "🌐", group: "system", desc: "基础配置与前端展示项" },
+];
+
+const TAB_GROUPS = [
+  { id: "data", label: "数据与概览", icon: "📊" },
+  { id: "ai", label: "核心 AI 引擎", icon: "🧠" },
+  { id: "content", label: "交互与内容", icon: "✨" },
+  { id: "system", label: "系统与设置", icon: "⚙️" },
 ];
 
 /* ------------------------------------------------------------ 基础 UI 块 */
@@ -897,6 +1016,63 @@ function SettingsGroup({
     setDraft((prev) => ({ ...prev, [key]: value }));
   }
 
+  function applyTtsPresets(nextProvider) {
+    const p = String(nextProvider || "").toLowerCase();
+    setDraft((prev) => {
+      const updated = { ...prev, provider: nextProvider };
+      if (p.includes("dashscope") || p.includes("qwen")) {
+        if (!prev.baseUrl || prev.baseUrl.includes("xiaomimimo") || prev.baseUrl.includes("openai")) {
+          updated.baseUrl = "https://dashscope.aliyuncs.com/api/v1";
+        }
+        if (!prev.model || prev.model.includes("mimo") || prev.model.includes("tts-1")) {
+          updated.model = "qwen-audio-3.1-tts-flash";
+        }
+        if (!prev.voice || prev.voice.includes("mimo") || prev.voice === "alloy") {
+          updated.voice = "longanhuan_v3.1";
+        }
+        if (!prev.voiceFemale || prev.voiceFemale.includes("冰糖") || prev.voiceFemale.includes("茉莉")) {
+          updated.voiceFemale = "longanhuan_v3.1";
+        }
+        if (!prev.voiceMale || prev.voiceMale.includes("苏打") || prev.voiceMale.includes("白桦")) {
+          updated.voiceMale = "longxiaochun_v3.1";
+        }
+        if (!prev.stylePrompt || prev.stylePrompt.includes("老朋友")) {
+          updated.stylePrompt = "用温柔、舒缓的语气朗读，像朋友在身旁陪伴一样。";
+        }
+      } else if (p.includes("mimo")) {
+        if (!prev.baseUrl || prev.baseUrl.includes("dashscope") || prev.baseUrl.includes("openai")) {
+          updated.baseUrl = "https://api.xiaomimimo.com/v1";
+        }
+        if (!prev.model || prev.model.includes("qwen") || prev.model.includes("tts-1")) {
+          updated.model = "mimo-v2.5-tts";
+        }
+        if (!prev.voice || prev.voice.includes("long") || prev.voice === "alloy") {
+          updated.voice = "mimo_default";
+        }
+        if (!prev.voiceFemale || prev.voiceFemale.includes("long")) {
+          updated.voiceFemale = "冰糖";
+        }
+        if (!prev.voiceMale || prev.voiceMale.includes("long")) {
+          updated.voiceMale = "苏打";
+        }
+        if (!prev.stylePrompt || prev.stylePrompt.includes("身旁陪伴")) {
+          updated.stylePrompt = "用温柔、缓慢、轻声细语的语调朗读，像一个老朋友在陪伴你说话。";
+        }
+      } else if (p.includes("openai")) {
+        if (!prev.baseUrl || prev.baseUrl.includes("dashscope") || prev.baseUrl.includes("xiaomimimo")) {
+          updated.baseUrl = "https://api.openai.com/v1";
+        }
+        if (!prev.model || prev.model.includes("qwen") || prev.model.includes("mimo")) {
+          updated.model = "tts-1";
+        }
+        if (!prev.voice || prev.voice.includes("long") || prev.voice.includes("mimo")) {
+          updated.voice = "alloy";
+        }
+      }
+      return updated;
+    });
+  }
+
   async function handleSave() {
     setSaving(true);
     setError("");
@@ -954,6 +1130,24 @@ function SettingsGroup({
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
         {fields.map((field) => {
+          const ctx = {
+            values: draft,
+            source,
+            getValue: (key) => (touched(key) ? draft[key] : source[key]),
+            provider: String(
+              touched("provider") ? draft.provider : source.provider || ""
+            ).toLowerCase(),
+            textValue,
+            boolValue,
+          };
+
+          if (typeof field.condition === "function" && !field.condition(ctx)) {
+            return null;
+          }
+
+          const fieldLabel = typeof field.label === "function" ? field.label(ctx) : field.label;
+          const fieldHint = typeof field.hint === "function" ? field.hint(ctx) : field.hint;
+
           // ⚠️ field.full = 这一项**独占一整行**。
           //    默认是两列并排，但"总开关"和它下面的参数挤在同一行会让层级看不出来 ——
           //    该占整行的就标 full。典型例子：「AI 根据聊天记录自动生成日记」。
@@ -966,9 +1160,9 @@ function SettingsGroup({
                 key={field.key}
                 className="md:col-span-2 mt-2 border-t border-[#eceeec] pt-3 first:mt-0 first:border-t-0 first:pt-0"
               >
-                <p className="text-sm font-semibold text-slate-700">{field.label}</p>
-                {field.hint ? (
-                  <p className="mt-0.5 text-xs text-slate-400">{field.hint}</p>
+                <p className="text-sm font-semibold text-slate-700">{fieldLabel}</p>
+                {fieldHint ? (
+                  <p className="mt-0.5 text-xs text-slate-400">{fieldHint}</p>
                 ) : null}
               </div>
             );
@@ -976,7 +1170,7 @@ function SettingsGroup({
 
           if (field.type === "boolean") {
             return (
-              <Field key={field.key} label={field.label} hint={field.hint} className={spanCls}>
+              <Field key={field.key} label={fieldLabel} hint={fieldHint} className={spanCls}>
                 <span className="inline-flex items-center gap-2 h-[34px]">
                   <input
                     type="checkbox"
@@ -998,7 +1192,7 @@ function SettingsGroup({
           if (field.type === "image") {
             const preview = safeImagePreview(textValue(field.key));
             return (
-              <Field key={field.key} label={field.label} hint={field.hint}>
+              <Field key={field.key} label={fieldLabel} hint={fieldHint}>
                 <div className="flex items-center gap-2">
                   <label className="inline-flex h-[34px] cursor-pointer items-center rounded-lg border border-[#d5d9d7] bg-white px-3 text-xs text-slate-600 transition-colors hover:bg-[#f2f5f4]">
                     选择图片
@@ -1046,10 +1240,16 @@ function SettingsGroup({
 
           if (field.type === "select") {
             return (
-              <Field key={field.key} label={field.label} hint={field.hint}>
+              <Field key={field.key} label={fieldLabel} hint={fieldHint} className={spanCls}>
                 <select
                   value={textValue(field.key)}
-                  onChange={(e) => setValue(field.key, e.target.value)}
+                  onChange={(e) => {
+                    const nextVal = e.target.value;
+                    setValue(field.key, nextVal);
+                    if (group === "tts" && field.key === "provider") {
+                      applyTtsPresets(nextVal);
+                    }
+                  }}
                   className={inputClass}
                 >
                   {(field.options || []).map((option) => (
@@ -1068,14 +1268,22 @@ function SettingsGroup({
             const options = fieldOptions[field.optionsKey] || [];
             const isModelField = field.key === "model" && typeof onFetchModels === "function";
             return (
-              <Field key={field.key} label={field.label} hint={field.hint}>
+              <Field key={field.key} label={fieldLabel} hint={fieldHint} className={spanCls}>
                 <ComboField
                   value={textValue(field.key)}
                   onChange={(next) => setValue(field.key, next)}
-                  placeholder={field.hint || ""}
+                  placeholder={fieldHint || ""}
                   inputClass={inputClass}
                   options={options}
-                  onFetch={isModelField ? onFetchModels : undefined}
+                  onFetch={
+                    isModelField
+                      ? () =>
+                          onFetchModels({
+                            baseUrl: textValue("baseUrl"),
+                            apiKey: textValue("apiKey"),
+                          })
+                      : undefined
+                  }
                   fetching={isModelField ? modelsBusy : false}
                 />
                 {options.length ? (
@@ -1090,7 +1298,7 @@ function SettingsGroup({
           if (field.type === "textarea") {
             return (
               <div key={field.key} className="md:col-span-2">
-                <Field label={field.label} hint={field.hint}>
+                <Field label={fieldLabel} hint={fieldHint}>
                   <textarea
                     rows={field.rows || 3}
                     value={textValue(field.key)}
@@ -1108,10 +1316,10 @@ function SettingsGroup({
             ? configured
               ? "已配置，留空表示不修改"
               : "尚未配置"
-            : field.hint || "";
+            : fieldHint || "";
 
           return (
-            <Field key={field.key} label={field.label} hint={field.hint}>
+            <Field key={field.key} label={fieldLabel} hint={fieldHint} className={spanCls}>
               <input
                 type={isSecret ? "password" : field.type === "number" ? "number" : "text"}
                 step={field.step}
@@ -1339,6 +1547,7 @@ const DASHBOARD_DAYS = [7, 14, 30];
 function DashboardPanel() {
   const [days, setDays] = useState(7);
   const [data, setData] = useState(null);
+  const [memStats, setMemStats] = useState(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
 
@@ -1346,8 +1555,13 @@ function DashboardPanel() {
     setLoading(true);
     try {
       setError("");
-      const result = await api(`/api/admin/dashboard?days=${days}`);
+      // 记忆观测指标与主看板并行拉取；它挂了不影响主看板
+      const [result, mem] = await Promise.all([
+        api(`/api/admin/dashboard?days=${days}`),
+        api(`/api/admin/memories/stats?days=${days}`).catch(() => null),
+      ]);
       setData(result);
+      setMemStats(mem);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -1433,6 +1647,37 @@ function DashboardPanel() {
           </div>
         ))}
       </div>
+
+      {memStats?.ok && (
+        <div className="border border-[#e6e8e6] rounded-lg p-3 mb-4">
+          <div className="flex items-center justify-between mb-2 flex-wrap gap-1">
+            <h3 className="text-xs font-bold text-slate-700">
+              长期记忆（近 {memStats.days} 天）
+            </h3>
+            <span className="text-xs text-slate-400">
+              注入 {memStats.totals.requests} 次 · 平均 {memStats.totals.avgFacts} 条/次
+            </span>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <div>
+              <div className="text-xs text-slate-500">注入次数</div>
+              <div className="text-xl font-bold text-slate-800">{memStats.totals.requests}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">累计注入条数</div>
+              <div className="text-xl font-bold text-slate-800">{memStats.totals.facts}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">压缩次数</div>
+              <div className="text-xl font-bold text-slate-800">{memStats.totals.compactRuns}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">压缩条数</div>
+              <div className="text-xl font-bold text-slate-800">{memStats.totals.compactedRows}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
         <div className="border border-[#e6e8e6] rounded-lg p-3">
@@ -2248,13 +2493,17 @@ const EMPTY_USER_FORM = {
   status: 1,
 };
 
-function UsersPanel({ setError, setNotice, onViewData }) {
-  const [data, setData] = useState(null);
+// 模块级用户管理快照缓存：切换 Tab 时 0 毫秒瞬间呈现，后台静默拉取更新（SWR 机制）
+let globalUsersCache = null;
+
+function UsersPanel({ setError, setNotice }) {
+  const [data, setData] = useState(() => globalUsersCache);
   const [keyword, setKeyword] = useState("");
   const [page, setPage] = useState(1);
   const [reveal, setReveal] = useState(false);
-  const [fields, setFields] = useState(null); // 已保存的开关
+  const [fields, setFields] = useState(() => globalUsersCache?.visibleFields || null); // 已保存的开关
   const [draftFields, setDraftFields] = useState(null); // 正在编辑、还没保存的开关
+  const [loading, setLoading] = useState(() => !globalUsersCache);
   const [savingFields, setSavingFields] = useState(false);
   const [form, setForm] = useState(null); // null 表示弹窗关闭
   const [busy, setBusy] = useState(false);
@@ -2267,6 +2516,7 @@ function UsersPanel({ setError, setNotice, onViewData }) {
     const nextKeyword = overrides.keyword ?? keyword;
     const nextReveal = overrides.reveal ?? reveal;
 
+    setLoading(true);
     try {
       const query = new URLSearchParams({
         keyword: nextKeyword,
@@ -2275,6 +2525,7 @@ function UsersPanel({ setError, setNotice, onViewData }) {
         revealPassword: nextReveal ? "1" : "0",
       });
       const result = await api(`/api/admin/users?${query.toString()}`);
+      globalUsersCache = result;
       setData(result);
       setPage(result.page || nextPage);
       setKeyword(nextKeyword);
@@ -2283,6 +2534,8 @@ function UsersPanel({ setError, setNotice, onViewData }) {
       setDraftFields((prev) => prev || result.visibleFields || {});
     } catch (err) {
       setError(err.message);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -2479,9 +2732,16 @@ function UsersPanel({ setError, setNotice, onViewData }) {
 
       <section className={cardClass}>
         <div className="flex flex-wrap items-center gap-2 mb-3">
-          <h2 className="text-sm font-bold text-slate-800 mr-auto">
-            用户列表（共 {data?.total ?? 0} 人）
-          </h2>
+          <div className="flex items-center gap-2 mr-auto">
+            <h2 className="text-sm font-bold text-slate-800">
+              用户列表（共 {data?.total ?? 0} 人）
+            </h2>
+            {loading && data ? (
+              <span className="text-[10px] text-[#b85a3c] bg-[#FFF5EF] px-2 py-0.5 rounded-full border border-[#f0ded4] animate-pulse">
+                同步中…
+              </span>
+            ) : null}
+          </div>
           <input
             value={keyword}
             onChange={(e) => setKeyword(e.target.value)}
@@ -2591,15 +2851,7 @@ function UsersPanel({ setError, setNotice, onViewData }) {
                     </td>
                   ) : null}
                   <td className="py-2 whitespace-nowrap">
-                    {onViewData ? (
-                      <button
-                        type="button"
-                        className="text-[#5b8aa6] hover:underline mr-2"
-                        onClick={() => onViewData(user.id)}
-                      >
-                        查看数据
-                      </button>
-                    ) : null}
+
                     <button
                       type="button"
                       className="text-[#5b8aa6] hover:underline mr-2"
@@ -2800,411 +3052,6 @@ function UsersPanel({ setError, setNotice, onViewData }) {
   );
 }
 
-/* ---------------------------------------------------------- 用户数据查看 */
-
-function UserDataPanel({ initialUserId, setError, setNotice }) {
-  const [keyword, setKeyword] = useState("");
-  const [candidates, setCandidates] = useState([]);
-  const [searching, setSearching] = useState(false);
-  const [userId, setUserId] = useState(initialUserId || null);
-  const [profile, setProfile] = useState(null);
-  const [diaries, setDiaries] = useState([]);
-  const [conversations, setConversations] = useState([]);
-  const [activeConv, setActiveConv] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [busy, setBusy] = useState(false);
-  // 自定义确认弹窗（替代 window.confirm）
-  const [confirmBox, setConfirmBox] = useState(null);
-  // 防止快速切换用户时，旧请求的响应盖掉新数据
-  const requestIdRef = useRef(0);
-
-  async function openConversation(targetId, conversation) {
-    setActiveConv(conversation);
-    setMessages([]);
-    try {
-      const data = await api(
-        `/api/admin/user-data?type=messages&userId=${targetId}&conversationId=${conversation.id}`
-      );
-      setMessages(data.messages || []);
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  async function loadUser(targetId) {
-    if (!targetId) return;
-
-    const requestId = requestIdRef.current + 1;
-    requestIdRef.current = requestId;
-
-    setBusy(true);
-    setError("");
-    setNotice("");
-    setUserId(targetId);
-    // 先清空上一个用户的数据，避免请求失败时新旧数据混在一起
-    setProfile(null);
-    setDiaries([]);
-    setConversations([]);
-    setActiveConv(null);
-    setMessages([]);
-
-    try {
-      const [profileData, diariesData, conversationsData] = await Promise.all([
-        api(`/api/admin/user-data?type=profile&userId=${targetId}`),
-        api(`/api/admin/user-data?type=diaries&userId=${targetId}`),
-        api(`/api/admin/user-data?type=conversations&userId=${targetId}`),
-      ]);
-
-      // 期间如果又点了别的用户，就丢弃这次结果
-      if (requestIdRef.current !== requestId) return;
-
-      setProfile(profileData);
-      setDiaries(diariesData.diaries || []);
-      setConversations(conversationsData.conversations || []);
-    } catch (err) {
-      if (requestIdRef.current === requestId) setError(err.message);
-    } finally {
-      if (requestIdRef.current === requestId) setBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    if (initialUserId) loadUser(initialUserId);
-    // 只在外部传入（从「用户管理」跳过来）时加载
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [initialUserId]);
-
-  async function searchUsers() {
-    setSearching(true);
-    setError("");
-    try {
-      const data = await api(
-        `/api/admin/users?keyword=${encodeURIComponent(keyword)}&page=1&pageSize=20`
-      );
-      setCandidates(data.users || []);
-      if (!data.users?.length) setNotice("没有搜到用户");
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setSearching(false);
-    }
-  }
-
-  function removeItem(type, id, label) {
-    setConfirmBox({
-      message: `确定删除${label}吗？此操作不可恢复。`,
-      confirmText: "删除",
-      onConfirm: () => doRemoveItem(type, id, label),
-    });
-  }
-
-  async function doRemoveItem(type, id, label) {
-    setConfirmBox(null);
-    setError("");
-    setNotice("");
-    try {
-      await api(`/api/admin/user-data?type=${type}&id=${id}`, { method: "DELETE" });
-      setNotice("已删除");
-
-      if (userId) {
-        // 删的是消息时，记住当前展开的会话，刷新后重新打开它
-        const keepConversation = type === "message" ? activeConv : null;
-        await loadUser(userId);
-        if (keepConversation) await openConversation(userId, keepConversation);
-      }
-    } catch (err) {
-      setError(err.message);
-    }
-  }
-
-  return (
-    <div className="space-y-4">
-      <section className={cardClass}>
-        <h2 className="text-sm font-bold text-slate-800 mb-1">选择用户</h2>
-        <p className="text-xs text-slate-500 mb-3">
-          搜索后点用户即可查看他的日记与聊天记录（也可以从「用户管理」点「查看数据」直接跳过来）。
-        </p>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <input
-            value={keyword}
-            onChange={(e) => setKeyword(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") searchUsers();
-            }}
-            placeholder="输入邮箱 / 账号 / 昵称，然后点搜索"
-            className={`${inputClass} w-64`}
-          />
-          <button type="button" className={btnBase} onClick={searchUsers} disabled={searching}>
-            {searching ? "搜索中..." : "搜索"}
-          </button>
-        </div>
-
-        {candidates.length > 0 ? (
-          <div className="flex flex-wrap gap-2 mt-3">
-            {candidates.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => loadUser(item.id)}
-                className={
-                  userId === item.id
-                    ? "px-3 py-1.5 text-xs rounded-lg bg-[#e3edf2] text-slate-900 font-bold"
-                    : "px-3 py-1.5 text-xs rounded-lg border border-[#e5e7e4] text-slate-600 hover:bg-[#eef1f2]"
-                }
-              >
-                #{item.id} {item.email}
-                {item.username ? `（${item.username}）` : ""}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </section>
-
-      {busy ? (
-        <section className={cardClass}>
-          <p className="text-xs text-slate-400">加载中...</p>
-        </section>
-      ) : null}
-
-      {profile ? (
-        <>
-          <section className={cardClass}>
-            <div className="flex items-center gap-3 mb-3">
-              <h2 className="text-sm font-bold text-slate-800">用户信息 #{profile.user.id}</h2>
-              <button
-                type="button"
-                className={`${btnBase} ml-auto`}
-                onClick={() => loadUser(userId)}
-              >
-                刷新
-              </button>
-            </div>
-
-            {/* ---- 心理画像（**用户端不可见**，只在这个后台页面展示）----
-                ⚠️ 放在基本信息下面、详细字段上面 —— 它的优先级比"性别/生日"这类字段高：
-                    它会影响这个用户每一次和 AI 聊天的语气，运营应该一眼看到。 */}
-            <div className="mb-4">
-              <PortraitPanel
-                portrait={profile.user.portrait}
-                version={profile.user.portraitVersion}
-                updatedAt={profile.user.portraitUpdatedAt}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs text-slate-600">
-              <div>
-                <span className="text-slate-400 block">邮箱</span>
-                <span className="break-all">{profile.user.email}</span>
-              </div>
-              <div>
-                <span className="text-slate-400 block">账号</span>
-                {profile.user.account || "-"}
-              </div>
-              <div>
-                <span className="text-slate-400 block">昵称</span>
-                {profile.user.username || "-"}
-              </div>
-              <div>
-                <span className="text-slate-400 block">性别</span>
-                {profile.user.gender || "-"}
-              </div>
-              <div>
-                <span className="text-slate-400 block">出生年月</span>
-                {profile.user.birthday || "-"}
-              </div>
-              <div>
-                <span className="text-slate-400 block">手机号</span>
-                {profile.user.phone || "-"}
-              </div>
-              <div>
-                <span className="text-slate-400 block">状态</span>
-                {profile.user.status === 1 ? "正常" : "已禁用"}
-              </div>
-              <div>
-                <span className="text-slate-400 block">注册时间</span>
-                <span className="font-mono">{profile.user.created_at || "-"}</span>
-              </div>
-              <div className="col-span-2 md:col-span-4">
-                <span className="text-slate-400 block">备注</span>
-                {profile.user.remark || "-"}
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-4 mt-4 pt-3 border-t border-[#eceeec] text-xs text-slate-500">
-              <span>
-                日记 <strong className="text-slate-800">{profile.stats?.diaries ?? 0}</strong> 篇
-              </span>
-              <span>
-                会话 <strong className="text-slate-800">{profile.stats?.conversations ?? 0}</strong> 个
-              </span>
-              <span>
-                消息 <strong className="text-slate-800">{profile.stats?.messages ?? 0}</strong> 条
-              </span>
-            </div>
-          </section>
-
-          <section className={cardClass}>
-            <h2 className="text-sm font-bold text-slate-800 mb-3">
-              📓 日记（{diaries.length}）
-            </h2>
-            {diaries.length === 0 ? (
-              <p className="text-xs text-slate-400">这个用户还没有写过日记</p>
-            ) : (
-              <div className="space-y-2 max-h-[360px] overflow-y-auto">
-                {diaries.map((item) => (
-                  <div key={item.id} className="border border-[#eceeec] rounded-lg p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className="text-sm text-slate-800 font-medium break-all">
-                          {item.title}
-                        </p>
-                        <p className="text-xs text-slate-400 font-mono mt-0.5">
-                          #{item.id}｜{item.created_at}
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        className="text-red-500 hover:underline text-xs shrink-0"
-                        onClick={() => removeItem("diary", item.id, "这篇日记")}
-                      >
-                        删除
-                      </button>
-                    </div>
-                    <p className="text-xs text-slate-600 whitespace-pre-wrap break-words mt-2">
-                      {item.content}
-                    </p>
-                  </div>
-                ))}
-              </div>
-            )}
-          </section>
-
-          <section className={cardClass}>
-            <h2 className="text-sm font-bold text-slate-800 mb-3">
-              💬 聊天会话（{conversations.length}）
-            </h2>
-            {conversations.length === 0 ? (
-              <p className="text-xs text-slate-400">这个用户还没有聊过天</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="text-slate-500 border-b border-[#eceeec]">
-                      <th className="text-left py-2 pr-3 font-medium">ID</th>
-                      <th className="text-left py-2 pr-3 font-medium">标题</th>
-                      <th className="text-left py-2 pr-3 font-medium">消息数</th>
-                      <th className="text-left py-2 pr-3 font-medium">创建时间</th>
-                      <th className="text-left py-2 font-medium">操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {conversations.map((item) => (
-                      <tr key={item.id} className="border-b border-[#f2f3f1] text-slate-600">
-                        <td className="py-2 pr-3 font-mono">{item.id}</td>
-                        <td className="py-2 pr-3 break-all">{item.title}</td>
-                        <td className="py-2 pr-3">{item.message_count}</td>
-                        <td className="py-2 pr-3 font-mono whitespace-nowrap">
-                          {item.created_at}
-                        </td>
-                        <td className="py-2 whitespace-nowrap">
-                          <button
-                            type="button"
-                            className="text-[#5b8aa6] hover:underline mr-2"
-                            onClick={() => openConversation(userId, item)}
-                          >
-                            查看消息
-                          </button>
-                          <button
-                            type="button"
-                            className="text-red-500 hover:underline"
-                            onClick={() =>
-                              removeItem("conversation", item.id, "整个会话（消息会一起删除）")
-                            }
-                          >
-                            删除
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-
-            {activeConv ? (
-              <div className="mt-4 border-t border-[#eceeec] pt-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <h3 className="text-xs font-bold text-slate-700">
-                    会话 #{activeConv.id}「{activeConv.title}」的消息（{messages.length}）
-                  </h3>
-                  <button
-                    type="button"
-                    className="text-xs text-slate-400 hover:text-slate-700 ml-auto"
-                    onClick={() => {
-                      setActiveConv(null);
-                      setMessages([]);
-                    }}
-                  >
-                    收起
-                  </button>
-                </div>
-
-                {messages.length === 0 ? (
-                  <p className="text-xs text-slate-400">没有消息</p>
-                ) : (
-                  <div className="space-y-2 max-h-[420px] overflow-y-auto">
-                    {messages.map((item) => (
-                      <div
-                        key={item.id}
-                        className={`rounded-lg p-2 text-xs ${
-                          item.role === "user" ? "bg-[#eef4f8]" : "bg-[#f6f6f4]"
-                        }`}
-                      >
-                        <div className="flex items-center gap-2 mb-1">
-                          <span className="font-mono text-slate-500">
-                            #{item.id} {item.role === "user" ? "用户" : "AI"}
-                          </span>
-                          <span className="text-slate-400 font-mono">{item.created_at}</span>
-                          <button
-                            type="button"
-                            className="text-red-500 hover:underline ml-auto"
-                            onClick={() => removeItem("message", item.id, "这条消息")}
-                          >
-                            删除
-                          </button>
-                        </div>
-                        <p className="text-slate-700 whitespace-pre-wrap break-words">
-                          {item.content}
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </section>
-        </>
-      ) : (
-        <section className={cardClass}>
-          <p className="text-xs text-slate-400">
-            先在上面搜索并选中一个用户，就能看到他的日记和聊天记录。
-          </p>
-        </section>
-      )}
-
-      {/* 自定义确认弹窗（替代 window.confirm） */}
-      <ConfirmModal
-        open={!!confirmBox}
-        message={confirmBox?.message || ""}
-        confirmText={confirmBox?.confirmText || "确认删除"}
-        onConfirm={confirmBox?.onConfirm || (() => {})}
-        onClose={() => setConfirmBox(null)}
-      />
-    </div>
-  );
-}
-
 /* -------------------------------------------------------------- 登录界面 */
 
 function LoginView({ onSuccess, setError, setNotice }) {
@@ -3227,42 +3074,83 @@ function LoginView({ onSuccess, setError, setNotice }) {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4">
-      <div className="w-full max-w-sm">
-        <h1 className="text-2xl font-bold text-center mb-1">Solace 管理后台</h1>
-        <p className="text-xs text-slate-500 text-center mb-6">账号密码 + 动态验证码（验证器 App）</p>
+    <div className="relative min-h-screen w-full overflow-hidden bg-gradient-to-br from-[#FFF8F5] via-[#FCF8F6] to-[#F0F4F8] text-slate-800 flex items-center justify-center px-4">
+      {/* 柔光光晕装饰：与用户登录页风格完全一致 */}
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -left-24 -top-32 h-[420px] w-[420px] rounded-full bg-[#FBE4DA]/60 blur-3xl"
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute -bottom-40 -right-24 h-[460px] w-[460px] rounded-full bg-[#CFE0F5]/60 blur-3xl"
+      />
 
-        <form onSubmit={submit} className={`${cardClass} space-y-3`}>
-          <Field label="管理员账号">
+      {/* 左上角返回首页 */}
+      <a
+        href="/"
+        className="absolute left-6 top-6 z-20 flex items-center gap-1.5 rounded-full bg-white/60 px-3.5 py-1.5 text-xs text-slate-600 backdrop-blur-sm transition-colors duration-150 hover:bg-white/90 hover:text-slate-800 shadow-2xs"
+      >
+        <span>←</span>
+        <span>返回首页</span>
+      </a>
+
+      <div className="relative z-10 w-full max-w-[400px] rounded-[24px] border border-white/80 bg-white/85 p-7 backdrop-blur-md shadow-xl shadow-[#b88576]/15">
+        <div className="flex flex-col items-center mb-6 text-center">
+          <img src="/logo.png" alt="Solace Logo" className="w-12 h-12 object-contain drop-shadow-xs mb-1.5" />
+          <div className="flex items-center gap-1.5 justify-center mb-1">
+            <img
+              src="/solace-wordmark.png"
+              alt="Solace"
+              className="h-6 w-auto object-contain"
+              style={{ height: "24px", width: "auto" }}
+            />
+            <span className="font-serif text-xl font-bold tracking-tight text-slate-800">管理后台</span>
+          </div>
+          <p className="text-xs text-slate-400 mt-1">账号密码 + 动态验证码（TOTP 双因素认证）</p>
+        </div>
+
+        <form onSubmit={submit} className="space-y-4">
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">管理员账号</label>
             <input
               value={form.username}
               onChange={(e) => setForm({ ...form, username: e.target.value })}
-              className={inputClass}
+              className="w-full rounded-xl border border-transparent bg-[#f6f3f1] px-4 py-2.5 text-sm text-gray-800 placeholder-slate-400 transition-all duration-150 focus:outline-none focus:bg-white focus:border-[#e2a68c] focus:ring-2 focus:ring-[#e2a68c]/20"
               autoComplete="username"
               required
             />
-          </Field>
-          <Field label="密码">
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">登录密码</label>
             <input
               type="password"
               value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
-              className={inputClass}
+              className="w-full rounded-xl border border-transparent bg-[#f6f3f1] px-4 py-2.5 text-sm text-gray-800 placeholder-slate-400 transition-all duration-150 focus:outline-none focus:bg-white focus:border-[#e2a68c] focus:ring-2 focus:ring-[#e2a68c]/20"
               autoComplete="current-password"
               required
             />
-          </Field>
-          <Field label="动态验证码" hint="验证器 App 上 30 秒刷新一次的 6 位数字">
+          </div>
+          <div>
+            <div className="flex justify-between items-center mb-1.5">
+              <label className="text-xs font-medium text-slate-600">动态验证码</label>
+              <span className="text-[11px] text-slate-400">验证器 App 6 位数字</span>
+            </div>
             <input
               inputMode="numeric"
               value={form.code}
               onChange={(e) => setForm({ ...form, code: e.target.value.replace(/\D/g, "").slice(0, 6) })}
-              className={`${inputClass} tracking-[0.4em] text-center font-mono`}
+              className="w-full rounded-xl border border-transparent bg-[#f6f3f1] px-4 py-2.5 text-base text-gray-800 tracking-[0.4em] text-center font-mono transition-all duration-150 focus:outline-none focus:bg-white focus:border-[#e2a68c] focus:ring-2 focus:ring-[#e2a68c]/20"
+              placeholder="000000"
               required
             />
-          </Field>
-          <button type="submit" className={`${btnPrimary} w-full`} disabled={loading}>
-            {loading ? "验证中..." : "登录"}
+          </div>
+          <button
+            type="submit"
+            className="w-full rounded-xl border border-[#b85a3c] bg-[#b85a3c] py-2.5 text-sm font-medium text-white shadow-md shadow-[#b85a3c]/20 transition-all duration-150 hover:bg-[#a34f33] active:scale-[0.98] disabled:opacity-50"
+            disabled={loading}
+          >
+            {loading ? "安全验证中..." : "登录后台"}
           </button>
         </form>
       </div>
@@ -3407,8 +3295,18 @@ export default function AdminPage() {
   const [overview, setOverview] = useState(null);
   const [settings, setSettings] = useState(null);
   const [tab, setTab] = useState("overview");
-  // 从「用户管理」点「查看数据」跳过来时要看哪个用户
-  const [dataUserId, setDataUserId] = useState(null);
+  const [activeGroup, setActiveGroup] = useState(() => {
+    return TABS.find((t) => t.id === "overview")?.group || "data";
+  });
+  const [tabSearch, setTabSearch] = useState("");
+
+  // 确保外部切换 tab 时，对应的主分类分组自动高亮
+  useEffect(() => {
+    const found = TABS.find((t) => t.id === tab);
+    if (found && found.group !== activeGroup) {
+      setActiveGroup(found.group);
+    }
+  }, [tab]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [ttsText, setTtsText] = useState("你好，我是 Solace，今天也愿意听你说说。");
@@ -3430,13 +3328,17 @@ export default function AdminPage() {
    * 拉取审核 AI 的可用模型。
    * ⚠️ 这里只填「下拉候选」，不会自动改模型名字段 —— 用户点了候选才生效。
    */
-  async function fetchReviewModels() {
+  async function fetchReviewModels(overrideConfig = {}) {
     setReviewModelsBusy(true);
     setError("");
     try {
+      const payload = { action: "models" };
+      if (overrideConfig?.baseUrl) payload.baseUrl = overrideConfig.baseUrl;
+      if (overrideConfig?.apiKey) payload.apiKey = overrideConfig.apiKey;
+
       const data = await api("/api/admin/review", {
         method: "POST",
-        body: { action: "models" },
+        body: payload,
       });
       const list = Array.isArray(data?.models) ? data.models : [];
       setReviewModels(list);
@@ -3551,14 +3453,22 @@ export default function AdminPage() {
 
   /**
    * 拉取上游可用的模型列表（OpenAI 协议的标准 GET /models 接口）。
-   * 用的是**已保存的配置** —— 所以改了 Key/地址之后要先点保存，再点这个按钮。
+   * 优先使用当前输入框中的 baseUrl 和 apiKey，未传时回退到已保存的配置。
+   * 用户修改完接口地址或 Key 后无需先点保存，点击即可直接拉取最新模型列表。
    */
-  async function fetchAiModels() {
+  async function fetchAiModels(overrideConfig = {}) {
     setAiModelsBusy(true);
     setError("");
     setNotice("");
     try {
-      const data = await api("/api/admin/ai/models");
+      const payload = {};
+      if (overrideConfig?.baseUrl) payload.baseUrl = overrideConfig.baseUrl;
+      if (overrideConfig?.apiKey) payload.apiKey = overrideConfig.apiKey;
+
+      const data = await api("/api/admin/ai/models", {
+        method: "POST",
+        body: payload,
+      });
       setAiModels(data.models || []);
       if (data.ok && (data.models || []).length) {
         setNotice(`拉取到 ${data.models.length} 个可用模型，点「模型名」输入框即可选择`);
@@ -3672,39 +3582,177 @@ export default function AdminPage() {
   }
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b border-[#e8eae7] bg-white">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center gap-3">
-          <span className="font-bold text-slate-800">Solace 管理后台</span>
-          <span className="text-xs text-slate-400">
-            {overview?.admin?.username ? `已登录：${overview.admin.username}` : ""}
-          </span>
-          <button type="button" className={`${btnBase} ml-auto`} onClick={handleLogout}>
-            退出登录
-          </button>
+    <div className="min-h-screen bg-[#FAF7F4] text-slate-800">
+      <header className="sticky top-0 z-40 border-b border-[#eee4dc] bg-[#FFF9F6]/95 backdrop-blur-md transition-all shadow-2xs">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <img src="/logo.png" alt="Solace Logo" className="w-8 h-8 object-contain drop-shadow-xs" />
+            <img
+              src="/solace-wordmark.png"
+              alt="Solace"
+              className="h-5 w-auto object-contain mt-0.5"
+              style={{ height: "20px", width: "auto" }}
+            />
+            <span className="font-serif text-sm font-semibold tracking-wide text-slate-700 hidden sm:inline border-l border-[#ecdcd3] pl-2.5">管理控制台</span>
+          </div>
+
+          {/* 快捷功能搜索框 */}
+          <div className="relative flex-1 max-w-xs hidden md:block">
+            <svg
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+            >
+              <circle cx="11" cy="11" r="7" />
+              <line x1="20" y1="20" x2="16.2" y2="16.2" />
+            </svg>
+            <input
+              type="text"
+              value={tabSearch}
+              onChange={(e) => setTabSearch(e.target.value)}
+              placeholder="搜索后台配置与功能..."
+              className="w-full pl-8 pr-7 py-1.5 text-xs rounded-full border border-[#ebe3dc] bg-white/90 focus:bg-white focus:outline-none focus:border-[#e2a68c] focus:ring-1 focus:ring-[#e2a68c]/30 transition-all placeholder-slate-400"
+            />
+            {tabSearch && (
+              <button
+                type="button"
+                onClick={() => setTabSearch("")}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 text-xs cursor-pointer"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3">
+            {overview?.admin?.username ? (
+              <div className="flex items-center gap-1.5 text-xs text-slate-600 bg-[#fdf5ef] px-3 py-1 rounded-full border border-[#f2ded4]">
+                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="font-medium">{overview.admin.username}</span>
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className="border border-[#ebe3dc] bg-white/90 text-slate-600 rounded-xl px-3 py-1.5 text-xs font-medium hover:bg-[#FAF7F4] hover:text-red-600 hover:border-red-200 active:scale-[0.98] transition-all cursor-pointer shadow-2xs"
+              onClick={handleLogout}
+            >
+              退出登录
+            </button>
+          </div>
         </div>
       </header>
 
-      <div className="max-w-6xl mx-auto px-4 py-4">
-        <div className="flex flex-wrap gap-2 mb-4">
-          {TABS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                setTab(item.id);
-                setError("");
-                setNotice("");
-              }}
-              className={
-                tab === item.id
-                  ? "px-3 py-1.5 text-sm rounded-lg bg-[#e3edf2] text-slate-900 font-bold"
-                  : "px-3 py-1.5 text-sm rounded-lg text-slate-500 hover:bg-[#eef1f2]"
-              }
-            >
-              {item.label}
-            </button>
-          ))}
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 py-5">
+        {/* 分类标签导航栏 */}
+        <div className="bg-white/90 rounded-2xl border border-[#eee4dc] p-3 mb-5 shadow-xs">
+          {tabSearch ? (
+            /* 搜索模式：直接平铺匹配项 */
+            <div>
+              <div className="flex items-center justify-between px-2 pb-2 mb-2 border-b border-[#f3ebe4]">
+                <span className="text-xs text-slate-500">
+                  搜索 “<span className="text-[#b85a3c] font-medium">{tabSearch}</span>” 的功能匹配项：
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setTabSearch("")}
+                  className="text-xs text-[#b85a3c] hover:underline cursor-pointer"
+                >
+                  清除搜索
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {TABS.filter(
+                  (item) =>
+                    item.label.toLowerCase().includes(tabSearch.toLowerCase()) ||
+                    item.desc.toLowerCase().includes(tabSearch.toLowerCase()) ||
+                    item.id.toLowerCase().includes(tabSearch.toLowerCase())
+                ).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      setTab(item.id);
+                      setActiveGroup(item.group);
+                      setError("");
+                      setNotice("");
+                    }}
+                    className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer ${
+                      tab === item.id
+                        ? "bg-gradient-to-r from-[#c06b50] to-[#b85a3c] text-white shadow-xs"
+                        : "bg-[#FAF8F5] text-slate-700 hover:bg-[#faede5] hover:text-[#b85a3c]"
+                    }`}
+                  >
+                    <span>{item.icon}</span>
+                    <span>{item.label}</span>
+                    <span className="text-[10px] opacity-70">({item.desc})</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            /* 标准分类模式：上层4个主类胶囊，下层具体二级功能按钮 */
+            <div className="space-y-2.5">
+              {/* 一级分类 */}
+              <div className="flex flex-wrap items-center gap-1.5 pb-2.5 border-b border-[#f3ebe4]">
+                {TAB_GROUPS.map((grp) => {
+                  const isCurrentGrp = activeGroup === grp.id;
+                  return (
+                    <button
+                      key={grp.id}
+                      type="button"
+                      onClick={() => {
+                        setActiveGroup(grp.id);
+                        // 自动切到该分类下的第一个 tab（如果当前 tab 不在该分类内）
+                        const grpTabs = TABS.filter((t) => t.group === grp.id);
+                        if (!grpTabs.some((t) => t.id === tab)) {
+                          setTab(grpTabs[0]?.id || "overview");
+                          setError("");
+                          setNotice("");
+                        }
+                      }}
+                      className={`flex items-center gap-1.5 px-4 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer ${
+                        isCurrentGrp
+                          ? "bg-[#FFF5EF] text-[#b85a3c] font-semibold border border-[#f0ded4] shadow-xs"
+                          : "text-slate-600 hover:text-slate-900 hover:bg-[#FAF8F5]"
+                      }`}
+                    >
+                      <span className="text-sm">{grp.icon}</span>
+                      <span>{grp.label}</span>
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-black/[0.04]">
+                        {TABS.filter((t) => t.group === grp.id).length}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* 二级功能按键 */}
+              <div className="flex flex-wrap gap-2 pt-0.5">
+                {TABS.filter((t) => t.group === activeGroup).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => {
+                      setTab(item.id);
+                      setError("");
+                      setNotice("");
+                    }}
+                    className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-medium transition-all duration-150 cursor-pointer ${
+                      tab === item.id
+                        ? "bg-gradient-to-r from-[#c06b50] to-[#b85a3c] text-white shadow-sm shadow-[#b85a3c]/20 scale-[1.02]"
+                        : "bg-[#FAF8F5] text-slate-700 hover:bg-[#faede5] hover:text-[#b85a3c] border border-transparent hover:border-[#f0ded4]"
+                    }`}
+                  >
+                    <span>{item.icon}</span>
+                    <span>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <FloatingAlert error={error} notice={notice} setError={setError} setNotice={setNotice} />
@@ -3794,21 +3842,6 @@ export default function AdminPage() {
               onSaved={loadAll}
             />
             <MusicTracksPanel setError={setError} setNotice={setNotice} />
-          </>
-        ) : null}
-
-        {tab === "pet" ? (
-          <>
-            <SettingsGroup
-              group="pet"
-              title="桌宠设置"
-              description="桌宠是用户端左下角（默认在屏幕中下方）那只可以拖动的蓝蝴蝶：点它会弹出一排情绪按钮，选一个就播对应的动画并说一句陪伴的话。这里管三件事 —— ① 开关与显示边长；② 形象库（可以放多张，指定用哪一张）；③ 情绪选项与回复话术（每条情绪可挂多句，随机挑一句，同一句在去重时间内不重复）。"
-              settings={settings}
-              setError={setError}
-              setNotice={setNotice}
-              onSaved={loadAll}
-            />
-            <PetPanel api={api} setError={setError} setNotice={setNotice} onSaved={loadAll} />
           </>
         ) : null}
 
@@ -3990,7 +4023,7 @@ export default function AdminPage() {
           <SettingsGroup
             group="tts"
             title="语音 TTS"
-            description="支持两种协议，按你的服务商选对应的「接口类型」：① OpenAI 兼容（智谱、OpenAI、多数厂商）→ POST {接口地址}/audio/speech，接口直接返回音频文件；② 小米 MiMo → POST {接口地址}/chat/completions，音频以 base64 形式放在 JSON 里返回。选错类型会报 400 / Invalid request。"
+            description="支持三种主流协议，切换「接口类型」后下方输入项会自动切换与联动预填：① OpenAI 兼容（POST /audio/speech，直接返回音频）；② 小米 MiMo（POST /chat/completions，音频为 base64，支持圆括号风格+方括号事件）；③ 阿里云百炼 DashScope（qwen-audio-3.1-tts-flash，支持指令 Instruction 控制方言口音与副语言事件）。"
             settings={settings}
             setError={setError}
             setNotice={setNotice}
@@ -4070,20 +4103,6 @@ export default function AdminPage() {
 
         {tab === "users" ? (
           <UsersPanel
-            setError={setError}
-            setNotice={setNotice}
-            onViewData={(userId) => {
-              setDataUserId(userId);
-              setTab("userdata");
-              setError("");
-              setNotice("");
-            }}
-          />
-        ) : null}
-
-        {tab === "userdata" ? (
-          <UserDataPanel
-            initialUserId={dataUserId}
             setError={setError}
             setNotice={setNotice}
           />

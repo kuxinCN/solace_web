@@ -12,6 +12,7 @@ import { analyzeDiaryMood } from "@/lib/ai";
 import { describeDbError, execute, query } from "@/lib/db";
 import { rateLimit } from "@/lib/rate-limit";
 import { ensureUserColumnsOnce } from "@/lib/schema";
+import { decryptContent } from "@/lib/secret-box";
 import { getCurrentUser } from "@/lib/user-auth";
 import { json, jsonError, readJsonBody } from "@/lib/util";
 
@@ -62,7 +63,8 @@ export async function POST(request) {
       return json({ ok: true, mood: diary.mood, cached: true });
     }
 
-    const result = await analyzeDiaryMood({ text: diary.content });
+    const plainText = decryptContent(diary.content);
+    const result = await analyzeDiaryMood({ text: plainText });
     if (!result.ok) {
       return jsonError(result.error || "暂时无法分析，请稍后再试", 502);
     }

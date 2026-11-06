@@ -9,7 +9,7 @@
  *  - 档位配色、圆环进度、趋势条等纯 UI 子组件（供蝴蝶气泡复用）
  *  - 数据通过 onData 回调传给父组件，父组件再传给蝴蝶气泡
  */
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect } from "react";
 
 /** 档位配色（按 max 分界，从低到高） */
 const TONE_BY_LEVEL = [
@@ -70,7 +70,7 @@ export function StressTrend({ history }) {
   );
 }
 
-export default function StressMeter({ api, onPendingPopup, onData }) {
+export default function StressMeter({ api, onPendingPopup, onData, refreshKey = 0 }) {
   const load = useCallback(async () => {
     try {
       const result = await api("/api/stress/state");
@@ -83,11 +83,13 @@ export default function StressMeter({ api, onPendingPopup, onData }) {
 
   // 45 秒轮询：聊天接口里的压力分析是 fire-and-forget，
   // "算完了、该弹窗了"这个结论得靠这里拉回来。
+  // refreshKey 变化（流式回复结束等）时立刻补拉一次 —— 危机词把分打到 95 是
+  // 请求到达时就同步写完的，等 45s 轮询才知道就太晚了（弹窗同理，也靠这次刷新带回来）。
   useEffect(() => {
     load();
     const timer = window.setInterval(load, 45000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [load, refreshKey]);
 
   return null; // 不可见组件
 }

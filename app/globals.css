@@ -19,6 +19,17 @@ body {
     sans-serif;
 }
 
+/* 屏蔽独立 PWA 模式下的橡皮筋整体下拉阻尼感（让体验完全等同于原生 App） */
+@media all and (display-mode: standalone), (display-mode: fullscreen) {
+  html,
+  body {
+    overscroll-behavior-y: none;
+    overscroll-behavior-x: none;
+    overscroll-behavior: none;
+    -webkit-overflow-scrolling: touch;
+  }
+}
+
 /* 消息气泡出现：上浮 8px + 淡入（只动 transform/opacity，合成层动画，不触发布局） */
 @keyframes msg-in {
   from {
@@ -71,20 +82,7 @@ body {
   }
 }
 
-/* ============================== 呼吸放松·双层水波纹 ==============================
- *
- * ⚠️ A / B 必须分层、不能共用 transform：
- *   A（.ripple ×3）—— 外围同心涟漪：只做 transform: scale + opacity，
- *                     是 .breath-circle 的兄弟节点，不跟随呼吸缩放；
- *   B（.breath-wave）—— 呼吸圈边缘起伏：只做 border-radius 形变，
- *                     是 .breath-circle 的子节点，靠父级继承位移、自身绝不动 transform。
- *   呼吸缩放本身在 .breath-circle 上（4s 吸 / 2s 停 / 6s 呼，--breath-cycle=12s）。
- * 两组动画都只在 .breath-wrap.is-active（运行中）时挂载，暂停/结束即整体停止。
- */
-
-/* A：一圈涟漪从呼吸圈边缘向外扩散并淡出（水滴落水面的同心波纹）。
- * 透明度在后半程才快速衰减：吸气时圆圈放大到 1.5，涟漪在下层会被遮住，
- * 等呼气收缩、涟漪露出圆圈边缘时仍保持可见，像"随呼气荡开的波纹"。 */
+/* ============================== 呼吸放松·双层水波纹 ============================== */
 @keyframes breath-ripple {
   0% {
     transform: scale(1);
@@ -99,8 +97,6 @@ body {
   }
 }
 
-/* B：呼吸圈边缘轻微起伏（±2~4%，幅度刻意压小，像水波不像果冻）。
- * 只动 border-radius，不碰 transform / box-shadow / filter。 */
 @keyframes breath-wave-morph {
   0% {
     border-radius: 50% 50% 50% 50%;
@@ -119,15 +115,13 @@ body {
   }
 }
 
-/* 呼吸节奏总周期（吸 4s + 停 2s + 呼 6s = 12s），涟漪时长/错峰都从它派生 */
 .breath-wrap {
   --breath-cycle: 12s;
   position: relative;
-  width: 7rem; /* 与呼吸圈静止尺寸一致（w-28），涟漪从圈边缘起步 */
+  width: 7rem;
   height: 7rem;
 }
 
-/* 呼吸圈本体：缩放节奏只发生在这一层（inline style 控制 transform + transition） */
 .breath-circle {
   position: relative;
   z-index: 1;
@@ -135,27 +129,21 @@ body {
   height: 100%;
 }
 
-/* A 层：三层同心细圆环，默认不可见；运行中才挂动画 */
 .breath-wrap .ripple {
   position: absolute;
   inset: 0;
   z-index: 0;
   border-radius: 50%;
-  border: 2px solid rgba(201, 139, 164, 0.55); /* 半透明暖粉 #C98BA4 */
+  border: 2px solid rgba(201, 139, 164, 0.55);
   opacity: 0;
-  pointer-events: none; /* 涟漪只是视觉层，不挡任何点击 */
-  will-change: transform, opacity; /* A 只有 transform + opacity，走合成层不触发重排 */
+  pointer-events: none;
+  will-change: transform, opacity;
 }
 
 .breath-wrap.is-active .ripple {
-  /* 一次涟漪 ≈ 呼吸周期的 1/3（4s） */
   animation: breath-ripple calc(var(--breath-cycle) / 3) ease-out infinite;
 }
 
-/* 三层在"一次涟漪时长"内三等分错开（用负延迟让打开瞬间三层已在途中）。
- * 注：若按字面各延迟 1/3 呼吸周期（=一次完整涟漪时长），三层会同相重叠、
- * 没有连续扩散感；故改为各错 1/3 涟漪时长（≈呼吸周期的 1/9），
- * 视觉上每 ~1.3s 推出一圈新波纹，三层首尾相接。 */
 .breath-wrap.is-active .ripple-2 {
   animation-delay: calc(var(--breath-cycle) / -9);
 }
@@ -163,8 +151,6 @@ body {
   animation-delay: calc(var(--breath-cycle) / -9 * 2);
 }
 
-/* B 层：覆盖在呼吸圈上的薄层，用 border 显示波动轮廓。
- * 默认透明无边框；运行中淡入轮廓并开始 border-radius 形变（约 7s 一圈，独立于呼吸节奏）。 */
 .breath-wave {
   position: absolute;
   inset: 0;
@@ -176,13 +162,11 @@ body {
 
 .breath-wrap.is-active .breath-wave {
   border-color: rgba(201, 139, 164, 0.7);
-  opacity: 0.55; /* 透明度静态给定，不参与动画 —— B 只动 border-radius */
+  opacity: 0.55;
   animation: breath-wave-morph 7s ease-in-out infinite;
 }
-/* ============================== /呼吸放松·双层水波纹 ============================== */
 
 @layer utilities {
-  /* 品牌展示字体：仅用于「Solace」品牌字与欢迎页大标题（衬线，安静而有文气） */
   .font-display {
     font-family: "Noto Serif SC", "Songti SC", serif;
   }
@@ -195,12 +179,10 @@ body {
     animation: tab-fade 120ms ease-out both;
   }
 
-  /* 弹窗淡入：200ms ease-out */
   .modal-fade {
     animation: modal-fade-in 200ms ease-out both;
   }
 
-  /* 减弱动态偏好：跳过上浮/淡入 */
   @media (prefers-reduced-motion: reduce) {
     .msg-in,
     .tab-fade,
@@ -209,3 +191,478 @@ body {
     }
   }
 }
+
+/* ============================== 温和暗光模式（深夜 Espresso Mode） ============================== */
+[data-theme="espresso"],
+.dark,
+.theme-espresso {
+  --background: #1C1917;
+  --foreground: #F5DCD3;
+  color-scheme: dark;
+}
+
+[data-theme="espresso"] body,
+.dark body,
+.theme-espresso body {
+  background-color: #1C1917 !important;
+  color: #F5DCD3 !important;
+}
+
+/* 消除所有白雾 text-shadow */
+[data-theme="espresso"] [style*="textShadow"],
+.dark [style*="textShadow"],
+.theme-espresso [style*="textShadow"] {
+  text-shadow: none !important;
+}
+
+/* 选中文本高亮：深琥珀暖色 */
+[data-theme="espresso"] ::selection,
+.dark ::selection,
+.theme-espresso ::selection {
+  background-color: #633527;
+  color: #FEECE5;
+}
+
+/* 滚动条 */
+[data-theme="espresso"] ::-webkit-scrollbar-thumb,
+.dark ::-webkit-scrollbar-thumb,
+.theme-espresso ::-webkit-scrollbar-thumb {
+  background-color: #382F28;
+  border-radius: 9999px;
+}
+[data-theme="espresso"] ::-webkit-scrollbar-track,
+.dark ::-webkit-scrollbar-track,
+.theme-espresso ::-webkit-scrollbar-track {
+  background-color: transparent;
+}
+
+/* 核心底色与卡片重映射（涵盖普通及带透明度类名） */
+[data-theme="espresso"] .bg-\[\#FAF7F4\],
+.dark .bg-\[\#FAF7F4\],
+.theme-espresso .bg-\[\#FAF7F4\],
+[data-theme="espresso"] .bg-\[\#FFF9F6\],
+.dark .bg-\[\#FFF9F6\],
+.theme-espresso .bg-\[\#FFF9F6\],
+[data-theme="espresso"] .bg-\[\#FFF9F6\]\/95,
+.dark .bg-\[\#FFF9F6\]\/95,
+.theme-espresso .bg-\[\#FFF9F6\]\/95,
+[data-theme="espresso"] .bg-\[\#FFFDFB\],
+.dark .bg-\[\#FFFDFB\],
+.theme-espresso .bg-\[\#FFFDFB\],
+[data-theme="espresso"] .bg-\[\#FFFDFB\]\/95,
+.dark .bg-\[\#FFFDFB\]\/95,
+.theme-espresso .bg-\[\#FFFDFB\]\/95,
+[data-theme="espresso"] .bg-\[\#FAF5F0\],
+.dark .bg-\[\#FAF5F0\],
+.theme-espresso .bg-\[\#FAF5F0\],
+[data-theme="espresso"] .bg-\[\#FDFBF9\],
+.dark .bg-\[\#FDFBF9\],
+.theme-espresso .bg-\[\#FDFBF9\],
+[data-theme="espresso"] .bg-\[\#fbf8f5\],
+.dark .bg-\[\#fbf8f5\],
+.theme-espresso .bg-\[\#fbf8f5\],
+[data-theme="espresso"] .bg-\[\#fdfaf7\],
+.dark .bg-\[\#fdfaf7\],
+.theme-espresso .bg-\[\#fdfaf7\],
+[data-theme="espresso"] .bg-\[\#f5eee6\],
+.dark .bg-\[\#f5eee6\],
+.theme-espresso .bg-\[\#f5eee6\],
+[data-theme="espresso"] .bg-\[\#faf4ee\],
+.dark .bg-\[\#faf4ee\],
+.theme-espresso .bg-\[\#faf4ee\],
+[data-theme="espresso"] .bg-\[\#faf4ef\],
+.dark .bg-\[\#faf4ef\],
+.theme-espresso .bg-\[\#faf4ef\],
+[data-theme="espresso"] .bg-\[\#FFF8F5\],
+.dark .bg-\[\#FFF8F5\],
+.theme-espresso .bg-\[\#FFF8F5\],
+[data-theme="espresso"] .bg-\[\#fff2ec\],
+.dark .bg-\[\#fff2ec\],
+.theme-espresso .bg-\[\#fff2ec\],
+[data-theme="espresso"] .bg-\[\#f5ebe3\]\/65,
+.dark .bg-\[\#f5ebe3\]\/65,
+.theme-espresso .bg-\[\#f5ebe3\]\/65,
+[data-theme="espresso"] .bg-\[\#fafaf8\],
+.dark .bg-\[\#fafaf8\],
+.theme-espresso .bg-\[\#fafaf8\],
+[data-theme="espresso"] .bg-\[\#fafaf8\]\/90,
+.dark .bg-\[\#fafaf8\]\/90,
+.theme-espresso .bg-\[\#fafaf8\]\/90,
+[data-theme="espresso"] .bg-\[\#fdfdfc\],
+.dark .bg-\[\#fdfdfc\],
+.theme-espresso .bg-\[\#fdfdfc\],
+[data-theme="espresso"] .bg-\[\#f7fafb\],
+.dark .bg-\[\#f7fafb\],
+.theme-espresso .bg-\[\#f7fafb\],
+[data-theme="espresso"] .bg-white,
+.dark .bg-white,
+.theme-espresso .bg-white,
+[data-theme="espresso"] .bg-white\/70,
+.dark .bg-white\/70,
+.theme-espresso .bg-white\/70,
+[data-theme="espresso"] .bg-white\/80,
+.dark .bg-white\/80,
+.theme-espresso .bg-white\/80,
+[data-theme="espresso"] .bg-white\/85,
+.dark .bg-white\/85,
+.theme-espresso .bg-white\/85,
+[data-theme="espresso"] .bg-white\/90,
+.dark .bg-white\/90,
+.theme-espresso .bg-white\/90,
+[data-theme="espresso"] .bg-white\/95,
+.dark .bg-white\/95,
+.theme-espresso .bg-white\/95 {
+  background-color: #231E1B !important;
+}
+
+/* 侧边栏/聊天主视窗底板 */
+[data-theme="espresso"] .bg-\[\#FAF7F4\],
+.dark .bg-\[\#FAF7F4\],
+.theme-espresso .bg-\[\#FAF7F4\] {
+  background-color: #1C1917 !important;
+}
+
+/* 登录与表单浅灰底框暗色转换 */
+[data-theme="espresso"] .bg-\[\#f6f3f1\],
+.dark .bg-\[\#f6f3f1\],
+.theme-espresso .bg-\[\#f6f3f1\] {
+  background-color: #1A1614 !important;
+  border-color: #382F28 !important;
+  color: #F5DCD3 !important;
+}
+
+/* 特殊暖灰粉底 */
+[data-theme="espresso"] .bg-\[\#FFF5EF\],
+.dark .bg-\[\#FFF5EF\],
+.theme-espresso .bg-\[\#FFF5EF\],
+[data-theme="espresso"] .bg-\[\#f8ede6\],
+.dark .bg-\[\#f8ede6\],
+.theme-espresso .bg-\[\#f8ede6\],
+[data-theme="espresso"] .bg-\[\#faeee7\],
+.dark .bg-\[\#faeee7\],
+.theme-espresso .bg-\[\#faeee7\],
+[data-theme="espresso"] .bg-\[\#faede6\],
+.dark .bg-\[\#faede6\],
+.theme-espresso .bg-\[\#faede6\],
+[data-theme="espresso"] .bg-slate-50,
+.dark .bg-slate-50,
+.theme-espresso .bg-slate-50,
+[data-theme="espresso"] .bg-slate-100,
+.dark .bg-slate-100,
+.theme-espresso .bg-slate-100 {
+  background-color: #2B231E !important;
+}
+
+/* 悬浮态响应 */
+[data-theme="espresso"] .hover\:bg-\[\#FFF5EF\]:hover,
+.dark .hover\:bg-\[\#FFF5EF\]:hover,
+.theme-espresso .hover\:bg-\[\#FFF5EF\]:hover,
+[data-theme="espresso"] .hover\:bg-\[\#faeee7\]:hover,
+.dark .hover\:bg-\[\#faeee7\]:hover,
+.theme-espresso .hover\:bg-\[\#faeee7\]:hover,
+[data-theme="espresso"] .hover\:bg-\[\#fff9f6\]:hover,
+.dark .hover\:bg-\[\#fff9f6\]:hover,
+.theme-espresso .hover\:bg-\[\#fff9f6\]:hover,
+[data-theme="espresso"] .hover\:bg-\[\#fcf6f2\]:hover,
+.dark .hover\:bg-\[\#fcf6f2\]:hover,
+.theme-espresso .hover\:bg-\[\#fcf6f2\]:hover,
+[data-theme="espresso"] .hover\:bg-\[\#FAF5F0\]:hover,
+.dark .hover\:bg-\[\#FAF5F0\]:hover,
+.theme-espresso .hover\:bg-\[\#FAF5F0\]:hover,
+[data-theme="espresso"] .hover\:bg-\[\#FAF7F4\]:hover,
+.dark .hover\:bg-\[\#FAF7F4\]:hover,
+.theme-espresso .hover\:bg-\[\#FAF7F4\]:hover,
+[data-theme="espresso"] .hover\:bg-\[\#f7f2ed\]:hover,
+.dark .hover\:bg-\[\#f7f2ed\]:hover,
+.theme-espresso .hover\:bg-\[\#f7f2ed\]:hover,
+[data-theme="espresso"] .hover\:bg-white\/50:hover,
+.dark .hover\:bg-white\/50:hover,
+.theme-espresso .hover\:bg-white\/50:hover,
+[data-theme="espresso"] .hover\:bg-white\/70:hover,
+.dark .hover\:bg-white\/70:hover,
+.theme-espresso .hover\:bg-white\/70:hover,
+[data-theme="espresso"] .hover\:bg-white:hover,
+.dark .hover\:bg-white:hover,
+.theme-espresso .hover\:bg-white:hover,
+[data-theme="espresso"] .hover\:bg-black\/\[0\.02\]:hover,
+.dark .hover\:bg-black\/\[0\.02\]:hover,
+.theme-espresso .hover\:bg-black\/\[0\.02\]:hover,
+[data-theme="espresso"] .hover\:bg-black\/\[0\.04\]:hover,
+.dark .hover\:bg-black\/\[0\.04\]:hover,
+.theme-espresso .hover\:bg-black\/\[0\.04\]:hover {
+  background-color: #342A24 !important;
+}
+
+/* 边框映射：温和深木褐边框 */
+[data-theme="espresso"] .border-\[\#eee4dc\],
+.dark .border-\[\#eee4dc\],
+.theme-espresso .border-\[\#eee4dc\],
+[data-theme="espresso"] .border-\[\#f0e3db\],
+.dark .border-\[\#f0e3db\],
+.theme-espresso .border-\[\#f0e3db\],
+[data-theme="espresso"] .border-\[\#ecdcd1\],
+.dark .border-\[\#ecdcd1\],
+.theme-espresso .border-\[\#ecdcd1\],
+[data-theme="espresso"] .border-\[\#f2e6dc\],
+.dark .border-\[\#f2e6dc\],
+.theme-espresso .border-\[\#f2e6dc\],
+[data-theme="espresso"] .border-\[\#f5dfd4\],
+.dark .border-\[\#f5dfd4\],
+.theme-espresso .border-\[\#f5dfd4\],
+[data-theme="espresso"] .border-\[\#f0ded4\],
+.dark .border-\[\#f0ded4\],
+.theme-espresso .border-\[\#f0ded4\],
+[data-theme="espresso"] .border-\[\#efe3d8\],
+.dark .border-\[\#efe3d8\],
+.theme-espresso .border-\[\#efe3d8\],
+[data-theme="espresso"] .border-\[\#efe3d8\]\/80,
+.dark .border-\[\#efe3d8\]\/80,
+.theme-espresso .border-\[\#efe3d8\]\/80,
+[data-theme="espresso"] .border-\[\#f0eae3\],
+.dark .border-\[\#f0eae3\],
+.theme-espresso .border-\[\#f0eae3\],
+[data-theme="espresso"] .border-\[\#f0eae3\]\/90,
+.dark .border-\[\#f0eae3\]\/90,
+.theme-espresso .border-\[\#f0eae3\]\/90,
+[data-theme="espresso"] .border-\[\#eddcd2\],
+.dark .border-\[\#eddcd2\],
+.theme-espresso .border-\[\#eddcd2\],
+[data-theme="espresso"] .border-\[\#ebe3dc\],
+.dark .border-\[\#ebe3dc\],
+.theme-espresso .border-\[\#ebe3dc\],
+[data-theme="espresso"] .border-\[\#ece3dc\],
+.dark .border-\[\#ece3dc\],
+.theme-espresso .border-\[\#ece3dc\],
+[data-theme="espresso"] .border-\[\#e0e3e0\],
+.dark .border-\[\#e0e3e0\],
+.theme-espresso .border-\[\#e0e3e0\],
+[data-theme="espresso"] .border-\[\#eceee9\],
+.dark .border-\[\#eceee9\],
+.theme-espresso .border-\[\#eceee9\],
+[data-theme="espresso"] .border-\[\#d5d9d7\],
+.dark .border-\[\#d5d9d7\],
+.theme-espresso .border-\[\#d5d9d7\],
+[data-theme="espresso"] .border-\[\#e8eae7\],
+.dark .border-\[\#e8eae7\],
+.theme-espresso .border-\[\#e8eae7\],
+[data-theme="espresso"] .border-slate-100,
+.dark .border-slate-100,
+.theme-espresso .border-slate-100,
+[data-theme="espresso"] .border-slate-200,
+.dark .border-slate-200,
+.theme-espresso .border-slate-200,
+[data-theme="espresso"] .border-slate-300,
+.dark .border-slate-300,
+.theme-espresso .border-slate-300 {
+  border-color: #382F28 !important;
+}
+
+/* 文字映射：暖杏色主文案，温和且暗室护眼 */
+[data-theme="espresso"] .text-\[\#302421\],
+.dark .text-\[\#302421\],
+.theme-espresso .text-\[\#302421\],
+[data-theme="espresso"] .text-\[\#2e2623\],
+.dark .text-\[\#2e2623\],
+.theme-espresso .text-\[\#2e2623\],
+[data-theme="espresso"] .text-slate-800,
+.dark .text-slate-800,
+.theme-espresso .text-slate-800,
+[data-theme="espresso"] .text-slate-800\/85,
+.dark .text-slate-800\/85,
+.theme-espresso .text-slate-800\/85,
+[data-theme="espresso"] .text-slate-900,
+.dark .text-slate-900,
+.theme-espresso .text-slate-900 {
+  color: #F5DCD3 !important;
+}
+
+[data-theme="espresso"] .text-slate-700,
+.dark .text-slate-700,
+.theme-espresso .text-slate-700,
+[data-theme="espresso"] .text-\[\#4a3b37\],
+.dark .text-\[\#4a3b37\],
+.theme-espresso .text-\[\#4a3b37\] {
+  color: #E8D5CC !important;
+}
+
+[data-theme="espresso"] .text-\[\#6e5851\],
+.dark .text-\[\#6e5851\],
+.theme-espresso .text-\[\#6e5851\],
+[data-theme="espresso"] .text-\[\#705a52\],
+.dark .text-\[\#705a52\],
+.theme-espresso .text-\[\#705a52\],
+[data-theme="espresso"] .text-slate-600,
+.dark .text-slate-600,
+.theme-espresso .text-slate-600,
+[data-theme="espresso"] .text-slate-500,
+.dark .text-slate-500,
+.theme-espresso .text-slate-500 {
+  color: #BFAFA7 !important;
+}
+
+[data-theme="espresso"] .text-slate-400,
+.dark .text-slate-400,
+.theme-espresso .text-slate-400,
+[data-theme="espresso"] .text-\[\#8c746b\],
+.dark .text-\[\#8c746b\],
+.theme-espresso .text-\[\#8c746b\],
+[data-theme="espresso"] .text-\[\#9a8278\],
+.dark .text-\[\#9a8278\],
+.theme-espresso .text-\[\#9a8278\] {
+  color: #94847B !important;
+}
+
+/* 常见灰色文本全局映射（防止组件深浅模式遗漏） */
+[data-theme="espresso"] .text-gray-900,
+.dark .text-gray-900,
+.theme-espresso .text-gray-900,
+[data-theme="espresso"] .text-gray-800,
+.dark .text-gray-800,
+.theme-espresso .text-gray-800 {
+  color: #F5DCD3 !important;
+}
+
+[data-theme="espresso"] .text-gray-700,
+.dark .text-gray-700,
+.theme-espresso .text-gray-700,
+[data-theme="espresso"] .text-gray-600,
+.dark .text-gray-600,
+.theme-espresso .text-gray-600 {
+  color: #E8D5CC !important;
+}
+
+[data-theme="espresso"] .text-gray-500,
+.dark .text-gray-500,
+.theme-espresso .text-gray-500 {
+  color: #BFAFA7 !important;
+}
+
+[data-theme="espresso"] .text-gray-400,
+.dark .text-gray-400,
+.theme-espresso .text-gray-400 {
+  color: #94847B !important;
+}
+
+/* 强调色文字调整为微亮琥珀 */
+[data-theme="espresso"] .text-\[\#c06b50\],
+.dark .text-\[\#c06b50\],
+.theme-espresso .text-\[\#c06b50\],
+[data-theme="espresso"] .text-\[\#b85a3c\],
+.dark .text-\[\#b85a3c\],
+.theme-espresso .text-\[\#b85a3c\] {
+  color: #EFA896 !important;
+}
+
+/* 输入框与文本域 */
+[data-theme="espresso"] input,
+.dark input,
+.theme-espresso input,
+[data-theme="espresso"] textarea,
+.dark textarea,
+.theme-espresso textarea {
+  color: #F5DCD3 !important;
+  background-color: transparent;
+}
+
+[data-theme="espresso"] input::placeholder,
+.dark input::placeholder,
+.theme-espresso input::placeholder,
+[data-theme="espresso"] textarea::placeholder,
+.dark textarea::placeholder,
+.theme-espresso textarea::placeholder {
+  color: #7D6D65 !important;
+}
+
+/* 对话气泡与卡片：深夜模式与暗色下统一采用深咖基底，彻底杜绝白底白字 */
+[data-theme="espresso"] .ai-msg-bubble,
+.dark .ai-msg-bubble,
+.theme-espresso .ai-msg-bubble {
+  background-color: #27211E !important;
+  border-color: #382F28 !important;
+  color: #F5DCD3 !important;
+}
+
+/* 自定义聊天背景下的 AI 气泡暗色毛玻璃兜底 */
+[data-theme="espresso"] .ai-bubble-with-bg,
+.dark .ai-bubble-with-bg,
+.theme-espresso .ai-bubble-with-bg {
+  background-color: rgba(35, 30, 27, 0.90) !important;
+  border-color: rgba(56, 47, 40, 0.85) !important;
+  color: #F5DCD3 !important;
+}
+
+/* 顶部导航与背景微光融合 */
+[data-theme="espresso"] header,
+.dark header,
+.theme-espresso header,
+[data-theme="espresso"] nav,
+.dark nav,
+.theme-espresso nav {
+  background-color: rgba(28, 25, 23, 0.95) !important;
+  border-color: #332A24 !important;
+}
+
+/* 气泡与菜单面板暗光适配 */
+[data-theme="espresso"] .warm-bubble,
+.dark .warm-bubble,
+.theme-espresso .warm-bubble {
+  background: #27211E !important;
+  border-color: #4A3A31 !important;
+  color: #F5DCD3 !important;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.4) !important;
+}
+
+/* ========================================================
+   宣传页与管理后台：始终保持优雅明亮的正常浅色模式，严禁受暗色影响
+   ======================================================== */
+.force-light,
+.force-light *,
+#landing-root,
+#landing-root *,
+#admin-root,
+#admin-root * {
+  color-scheme: light !important;
+}
+
+[data-theme="espresso"] #landing-root,
+.dark #landing-root,
+.theme-espresso #landing-root,
+[data-theme="espresso"] #admin-root,
+.dark #admin-root,
+.theme-espresso #admin-root {
+  background-color: #fafaf8 !important;
+  color: #1e293b !important;
+}
+
+/* 宣传页在强制浅色下的背景与文字保护 */
+[data-theme="espresso"] #landing-root .text-stone-800,
+.dark #landing-root .text-stone-800 {
+  color: #292524 !important;
+}
+[data-theme="espresso"] #landing-root .text-stone-600,
+.dark #landing-root .text-stone-600 {
+  color: #57534e !important;
+}
+[data-theme="espresso"] #landing-root .text-stone-500,
+.dark #landing-root .text-stone-500 {
+  color: #78716c !important;
+}
+[data-theme="espresso"] #landing-root .bg-white\/90,
+.dark #landing-root .bg-white\/90,
+[data-theme="espresso"] #landing-root .bg-white\/80,
+.dark #landing-root .bg-white\/80 {
+  background-color: rgba(255, 255, 255, 0.9) !important;
+}
+
+/* 管理后台在强制浅色下的保护 */
+[data-theme="espresso"] #admin-root .bg-white,
+.dark #admin-root .bg-white {
+  background-color: #ffffff !important;
+}
+[data-theme="espresso"] #admin-root .text-slate-800,
+.dark #admin-root .text-slate-800,
+[data-theme="espresso"] #admin-root .text-slate-900,
+.dark #admin-root .text-slate-900 {
+  color: #0f172a !important;
+}
+

@@ -38,7 +38,7 @@ export default function MoodPicker({ value, onChange, disabled = false, classNam
   const current = normalizeMood(value);
 
   return (
-    <div className={`flex flex-wrap gap-1.5 ${className}`}>
+    <div className={`flex flex-wrap gap-2 ${className}`}>
       {MOOD_ORDER.map((mood) => {
         const active = current === mood;
         return (
@@ -47,11 +47,10 @@ export default function MoodPicker({ value, onChange, disabled = false, classNam
             type="button"
             disabled={disabled}
             onClick={() => onChange?.(active ? "" : mood)}
-            className={`rounded-full px-2.5 py-1 text-[11px] transition-colors disabled:opacity-50 ${
-              active
-                ? "bg-[#e3edf3] text-slate-800 ring-1 ring-[#a9c6da]"
-                : "bg-[#f5f6f5] text-slate-500 hover:bg-[#eceeec] hover:text-slate-700"
-            }`}
+            className={`rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-150 cursor-pointer disabled:opacity-50 ${active
+                ? "bg-[#FFF5EF] dark:bg-[#3D2920] text-[#b85a3c] dark:text-[#EFA896] border border-[#f0ded4] dark:border-[#5C3C2E] shadow-xs ring-1 ring-[#b85a3c]/35 dark:ring-[#EFA896]/35 font-semibold scale-[1.02]"
+                : "bg-white dark:bg-[#251F1C] text-slate-700 dark:text-[#D1C0B6] border border-[#eddcd2] dark:border-[#3E332B] hover:bg-[#fff9f6] dark:hover:bg-[#302620] hover:text-[#b85a3c] dark:hover:text-[#EFA896] hover:border-[#e2a68c] dark:hover:border-[#EFA896]/40"
+              }`}
           >
             {mood}
           </button>
@@ -77,13 +76,14 @@ export function MoodBadge({ mood, source = "user", className = "" }) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${
-        isUser ? "bg-[#eef4f1] text-[#5b8aa6]" : "bg-[#f5f1ee] text-[#a98778]"
-      } ${className}`}
+      className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium border transition-colors ${isUser
+          ? "bg-[#FFF5EF] dark:bg-[#33241D] text-[#b85a3c] dark:text-[#EFA896] border-[#f5dfd4] dark:border-[#4E362A]"
+          : "bg-[#f5f1ee] dark:bg-[#251F1C] text-[#8c746b] dark:text-[#BFAFA7] border-[#ebdcd2] dark:border-[#382F28]"
+        } ${className}`}
       title={isUser ? "你自己选的标签" : "AI 读出来的标签"}
     >
-      <span className="opacity-70">{isUser ? "用户" : "AI"}</span>
-      <span>·</span>
+      <span className="opacity-75">{isUser ? "用户" : "AI"}</span>
+      <span className="opacity-40">·</span>
       <span>{value}</span>
     </span>
   );

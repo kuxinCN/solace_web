@@ -112,12 +112,12 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 | `PATCH` | `/api/admin/users` | 修改用户（含禁用/启用、重置密码） |
 | `DELETE` | `/api/admin/users?id=` | 删除用户（级联删其对话/消息/日记） |
 | `GET` | `/api/admin/users?revealPassword=1&id=` | 查看某用户的**明文密码**（写审计日志 `reveal_user_password`） |
-| `GET` | `/api/admin/user-data?userId=&type=profile\|diaries\|conversations\|messages` | 查看某用户的详细数据 |
-| `DELETE` | `/api/admin/user-data?type=diary\|conversation\|message&id=` | 删除某条用户数据 |
 | `GET` | `/api/admin/logs` | 审计日志（分页） |
 | `GET` | `/api/admin/database` | 当前数据库配置（不含密码） |
 | `POST` | `/api/admin/database` | 保存并热切换数据库连接（先测试连通性，失败不改） |
 | `POST` | `/api/admin/mail/test` | 发送测试邮件 |
+| `POST` | `/api/admin/memories/compact` | **手动触发长期记忆压缩**：`{ userId?, force?=true, batch? }`。带 `userId` 只压该用户（跳过 150 条阈值，便于本地验证）；不带则跑一轮"超标用户"扫描（同调度器每天那次）。**AI 失败/返回空/总结没落库时不会标记任何旧记忆** |
+| `GET` | `/api/admin/memories/stats?days=7` | 长期记忆观测指标：按天的注入次数 / 注入条数 / 字符数 / 压缩次数 / 压缩条数，附窗口总计与 `avgFacts` |
 | `POST` | `/api/admin/tts/test` | 试听语音合成 |
 | `GET` / `POST` / `PATCH` / `DELETE` | `/api/admin/pet/images` | 桌宠**形象库**：列表（含"当前用哪张"与磁盘占用）/ 新增 / 改名与启停 / 删除（删掉当前那张会自动回退内置默认图） |
 | `POST` | `/api/admin/pet/images/upload` | 上传形象（multipart：`file`；≤2MB；扩展名白名单 + **魔数嗅探**，拒收改名成图片的 SVG；存 `public/pets/`） |
@@ -184,7 +184,7 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/user/profile` | 读取资料（snake_case 全字段；`avatar_url` 等图片是 base64 data URL） |
-| `PUT` | `/api/user/profile` | 局部更新（只传要改的字段） |
+| `PUT` | `/api/user/profile` | 局部更新（支持 username、bio、gender、birthday、aiPersona、ttsDialect 等） |
 | `POST` | `/api/user/upload` | 上传图片：`{ kind: "avatar"\|"aiAvatar"\|"background", dataUrl }` |
 | `PUT` | `/api/user/email` | 换登录邮箱（会清空所有会话，需重新登录） |
 | `PUT` | `/api/user/password` | 设置 / 修改密码 |
@@ -210,7 +210,7 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/user/diaries` | 列表（含 `mood` 情绪标签，按 id 倒序） |
+| `GET` | `/api/user/diaries` | 列表（含 `mood` 情绪标签、`source` / `author` 作者标识，按 id 倒序） |
 | `POST` | `/api/user/diaries` | 新建：`{ title, content }` |
 | `PATCH` | `/api/user/diaries` | 编辑：`{ id, title?, content? }`；**改正文会清空情绪标签** |
 | `DELETE` | `/api/user/diaries?id=` | 删除 |
@@ -222,6 +222,31 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 - **不做数值评分、不做趋势对比、不用红黄绿分级配色**
 - 标签只用于让用户「被看见」，不触发任何自动建议
 - 模型输出会经过白名单过滤，胡说的内容会落到「说不清」
+
+**作者标识（`source` / `author`）**：
+
+- 库里只有 **`source` 一列**：`'user'` = 用户自己写，`'ai'` = 暖言按当天聊天记录生成（默认 `'user'`）
+- 列表接口额外返回 `author`，值是 `source` 的**别名**（同一个意思，不是第二个字段）—— 前端按任一字段过滤都能对上
+- 前端日记页用它分「我的日记 / 暖言日记」两个 Tab；**不要新增重复的 `author` 列**，两列同义迟早会读写不一致
+- AI 日记另有 `diary_date` 标明写的是哪一天（用户日记为空）
+
+### 长期记忆
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/user/memories?graph=1` | **记忆星云（3D）**：一次返回最多 **150** 个节点（`id / content / category / superseded_at / strength / created_at`），排序为「有效 → 画像/偏好/关系/愿望 → 强度降序」；额外返回 `total` 与 `truncated`（是否被 150 上限截断） |
+| `GET` | `/api/user/memories?q=&page=&pageSize=` | 分页列表（默认 30 条/页，上限 100），按「有效在前、新在前」 |
+| `POST` | `/api/user/memories` | 新增：`{ content }`；与已有记忆近似重复时**不新增**，只强化旧记录（返回 `deduplicated: true`） |
+| `PATCH` | `/api/user/memories` | 改内容 / 分类：`{ id, content?, category? }`；恢复失效记忆：`{ id, restore: true }`（**同时把 `strength` 重置为 100、`last_accessed_at` 刷成当前时间**） |
+| `DELETE` | `/api/user/memories?id=`（或 `{ ids }`） | 默认进回收站（保留 3 天）；带 `?permanent=1` 彻底删除 |
+
+**衰减字段（`strength` / `last_accessed_at`）**：
+
+- `strength` 0~100，由每天的衰减任务按「距上次被想起的天数 × 类别速率」**重算**（不是在原值上递减）；
+- 画像 / 偏好 / 关系 / 愿望是**核心白名单**：强度下限 **30**、永不进回收站、永不截字（昵称在账号资料里，不参与衰减）；
+- 被注入提示词或被再次提及时会**唤醒**：`strength=100`、`last_accessed_at=NOW()`；
+- `strength < 10` 的记忆正文只剩第一个字，图谱里几乎透明；
+- **图谱模式最多 150 个节点** —— 这是前端 3D 电子云（WebGL）的性能上限，不要调大。
 
 ---
 
@@ -236,12 +261,14 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 {
   "messages": [{ "role": "user", "content": "最近好累" }],
   "stream": true,
-  "diaryContext": "（可选）刚写完的日记正文"
+  "diaryContext": "（可选）刚写完的日记正文",
+  "clientTime": { "timestamp": 1793896500000, "timeZone": "Asia/Shanghai" }
 }
 ```
 
 - `stream: true` → 返回 `text/event-stream`，格式 `data: {"delta":"文字"}\n\n`，结束时发 `data: [DONE]`
 - `stream: false` → 返回 `{ ok: true, reply: "完整回复" }`
+- **时间感知基准**：支持注入现实时间背景（公历年月日、星期几、时间、时段）。后台「AI 设置」可配置时钟源为 `client`（用户本地时间，默认）或 `server`（服务器系统时间）。AI 能准确回答几点周几，并具备昼夜作息感知
 - **系统提示词由后端从数据库注入**（后台「对话 AI」可改，保存即生效，不用重启）
 - 前端传来的 `system` 消息在后台配置了提示词时会被覆盖；后台留空则使用前端的
 - `diaryContext` 会按后台配置的模板（`{diary}` 占位符）拼进上下文
@@ -273,6 +300,7 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 |---|---|---|---|
 | OpenAI 兼容 | `{接口地址}/audio/speech` | `Authorization: Bearer` | 响应体（二进制） |
 | 小米 MiMo | `{接口地址}/chat/completions` | `api-key` | `choices[0].message.audio.data`（base64） |
+| 阿里云百炼 DashScope | `{接口地址}/services/aigc/multimodal-generation/generation` | `Authorization: Bearer` | `output.audio_url`（自动下载音频）或二进制流，支持方言指令与声音事件 |
 
 > 接口地址**填到版本目录或填完整地址都行**，程序会自动识别，不会重复拼接。
 
@@ -378,7 +406,8 @@ UPDATE admin_users SET failed_attempts = 0, locked_until = NULL;
 另有两处**不经过 HTTP 接口**的剥离：每日记忆汇总（`lib/daily-memory.js`）在捞昨天消息后剥，
 `/api/pet`、`/api/stickers` 之类与朗读无关的接口不涉及。
 
-**生效条件**：`tts.enabled` + `tts.styleTags !== false` + `provider` 含 `mimo`，三者同时满足。
+**生效条件**：`tts.enabled` + `tts.styleTags !== false` + `provider` 含 `mimo` 或 `dashscope`/`qwen`，三者同时满足。
+⚠️ 这套逻辑在**接口类型含 `mimo` 或 `dashscope`/`qwen`** 时生效。已完整适配小米 MiMo 与阿里云百炼 `qwen-audio-3.1-tts-flash`（支持方言指令与副语言拟声标签）。
 ⚠️ 这套逻辑只在**接口类型含 `mimo`** 时生效。线上已于 2026-10-03 切到小米 MiMo（`mimo-chat`），
 所以它是真在跑：`/api/chat` 注入标签指令、`/api/tts/config` 告诉前端"要剥、按哪份词表剥"、
 用户看到的气泡是剥过的文字，而 `/api/tts` 拿到的仍是带标签的原文。

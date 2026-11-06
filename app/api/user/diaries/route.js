@@ -1,3 +1,5 @@
+import { decryptContent, encryptText } from "@/lib/secret-box";
+import { indexDiary, searchDiariesByBlindIndex } from "@/lib/searchable-encryption";
 /** 日记：列表 / 新增 / 编辑 / 删除 */
 import { describeDbError, execute, query } from "@/lib/db";
 import { enqueueReview } from "@/lib/content-review";
@@ -49,6 +51,9 @@ export async function GET(request) {
       ok: true,
       diaries: diaries.map((item) => ({
         ...item,
+        title: decryptContent(item.title),
+        content: decryptContent(item.content),
+        author: item.source === "ai" ? "ai" : "user",
         diary_date: toDateOnly(item.diary_date),
       })),
     });
@@ -102,12 +107,16 @@ export async function POST(request) {
     // ⚠️ diary_date = **当天**：用户自己写的日记，"对应的那一天"就是写它的那天。
     //    有了它，前端展示日期就不用去猜 created_at 的时区，
     //    而且和 AI 生成的日记（diary_date = 聊天那天）是同一套语义。
+    const cipherTitle = encryptText(title);
+    const cipherContent = encryptText(content);
     const result = await execute(
       "INSERT INTO diaries (user_id, title, content, user_mood, diary_date) VALUES (?, ?, ?, ?, CURDATE())",
-      [user.id, title, content, userMood]
+      [user.id, cipherTitle, cipherContent, userMood]
     );
 
     const diaryId = result.insertId;
+    // 异步构建日记密文盲索引
+    void indexDiary(user.id, diaryId, `${title} ${content}`);
 
     // 放进「日记打标」队列：之后由批量 AI 抽一个情绪标签，写进 diaries.mood。
     //
@@ -181,7 +190,7 @@ export async function PATCH(request) {
 
   if (typeof body.title === "string") {
     sets.push("title = ?");
-    params.push(cleanString(body.title, 120) || "无题");
+    params.push(encryptText(cleanString(body.title, 120) || "无题"));
   }
   // 用户自己改情绪标签（和 AI 打的 mood 分开存）
   if (typeof body.userMood === "string") {
@@ -193,7 +202,7 @@ export async function PATCH(request) {
     const content = cleanString(body.content, MAX_CONTENT_CHARS);
     if (!content) return jsonError("正文不能为空", 400);
     sets.push("content = ?");
-    params.push(content);
+    params.push(encryptText(content));
     // 正文改了，AI 之前打的标签不再适用 → 清掉，下面会重新排队打标
     sets.push("mood = NULL");
   }

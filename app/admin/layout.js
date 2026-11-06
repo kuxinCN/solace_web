@@ -1,3 +1,5 @@
+import AdminThemeReset from "@/components/AdminThemeReset";
+
 export const metadata = {
   title: "Solace 管理后台",
   description: "Solace 站点配置与运行状态管理",
@@ -5,5 +7,10 @@ export const metadata = {
 };
 
 export default function AdminLayout({ children }) {
-  return <div className="min-h-screen bg-[#fafaf8] text-slate-800">{children}</div>;
+  return (
+    <div id="admin-root" className="min-h-screen bg-[#fafaf8] text-slate-800 force-light">
+      <AdminThemeReset />
+      {children}
+    </div>
+  );
 }

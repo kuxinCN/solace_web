@@ -342,3 +342,121 @@ bash scripts/health-check.sh
 > ⚠️ 一个**不需要担心**的点：标签只写在助手的回复里，**不会进标题、不会进记忆** ——
 > 标题生成和每日记忆汇总在喂给 AI 之前都先剥一遍（见 `docs/TTS.md` §一）。
 
+---
+
+## 十一、2026-10：聊天 SSE 首字延迟 + 记忆衰减每日任务
+
+### 11.1 首字慢：不是模型慢，是"开流前在串行等库"
+
+聊天接口在 `fetch(上游 AI)` 之前要读好几样东西：登录会话、AI/TTS 配置、心理画像、记忆候选、内容安全配置。
+它们**互不依赖**，但早先是串着 `await` 的 —— 每多一次远端往返，首字就晚 0.5~1.5 秒。
+
+| 处理 | 为什么这么做 |
+|---|---|
+| 画像查询提到最前面，与记忆候选、配置**同时发起**（`Promise.all` 语义，用到时再 `await`） | 它只是"读一次画像表 + 本地映射"，没有任何理由排在配置读完之后 |
+| `checkUserContent` 在 `request.json()` 之后**立刻发起** | 它只依赖本轮用户原话（纯正则 + 一次带 30 秒缓存的 safety 配置读取）；等记忆读完再检测 = 白等一次库往返 |
+| 记忆查询超时 **800 → 500ms**（`withMemoryTimeout`） | 记忆是锦上添花：远端库抖动时，宁可这轮不注入，也不把首字拖到 1 秒以上 |
+| 记忆注入硬顶 **800 → 500 字**（`MEMORY_TOTAL_CHARS`） | 输入越短 TTFT 越快；500 字仍能装下"画像 + 2 条日报 + 4 条常驻 + 最相关的几条"，因为拼装是从末尾（最相关）往前装的 |
+| 每次对话打一条 `[chat] prompt: total=… system=…(blocks=…) history=…` | **只有长度，不含内容**。以后首字再变慢，看日志就知道是人格提示词、画像、记忆还是历史在涨，不用猜 |
+| 贴纸决策在流尾 **最多等 400ms** | 它本来与文字流并行，正常早就有结果；但 AI 兜底最长要几秒，不能让它把 `[DONE]` 拖住（前端要等流结束才落库、才能发下一句） |
+| 记忆唤醒 `markMemoriesAccessed` **不 await** | 一条 UPDATE 而已，写在主链路上等于白等一次往返 |
+
+前端侧（`app/chat/page.js`）：SSE 每几十毫秒一个 delta，原先每个都 `setMessages`（整条消息数组 map），
+中文长回复时肉眼可见地卡。现在用 `createDeltaThrottle` **60ms 合批**，`replace` / `error` / 流结束强制 flush ——
+既降了渲染次数，也不会丢最后一段。
+
+> 实测口径：`/api/chat` 的 `[chat] prompt` 日志 + 浏览器 Network 里的首字节时间。
+> 开流前的库查询从"串行 3~4 次"变成"并行 1 轮"，正常网络下首字能省 1 秒上下（具体看远端库 RTT）。
+
+### 11.2 记忆衰减：每天一条 UPDATE，不碰聊天热路径
+
+衰减与遗忘（`lib/memory-decay.js`）只挂在 `lib/scheduler.js` 的**每日日期槽**里，
+聊天请求只多了一次 fire-and-forget 的唤醒 UPDATE（被注入的记忆 ≤20 条）。
+
+| 处理 | 为什么这么做 |
+|---|---|
+| 强度按 **绝对天数重算**（`100 - 天数 × 速率`），不做"每日递减" | 幂等：重启、补跑、跨天重复执行都不会多扣一次，也不会因为进程没跑而少扣 |
+| 一条 `UPDATE … CASE …` 算完全表 | 逐行 `SELECT` + `UPDATE` 在远端库上会慢得离谱；SQL 里只按类别分支，不调 AI |
+| `WHERE last_accessed_at < NOW() - INTERVAL 1 DAY` + `LIMIT 5000` | 跳过刚写入/刚唤醒的行（本来就在 100），并给单次执行一个上限；`ORDER BY` 从最旧开始，避免老数据被饿死 |
+| 截字与回收都分批（`LIMIT` + 每 200 条一批删除） | 一条超长 SQL 容易锁表；分批失败也只影响那一批 |
+| 归零先写 `trash` 再删 | 自动删除没有用户操作兜底，规则万一误判还得能捞回来（保留 3 天） |
+| 存量数据补列时填 `strength=100 / last_accessed_at=NOW()` | 宽限期：否则上线当天，库里躺了几个月的记忆会被一夜清空 |
+
+> 记忆量特别大的部署：调大 `DECAY_BATCH`，或把任务改成"按用户分批"（当前单实例、单次 5000 条足够）。
+
+---
+
+## 十二、2026-10：记忆星云（3D 电子云）为什么不卡
+
+「记忆库」从列表 → 2D Canvas → force-graph 3D 星云 → **原生 Three.js 电子云**（`components/MemoryGraph3D.jsx`）。
+这一版没有力导向引擎、也没有动画循环，每条都设了硬边界：
+
+| 处理 | 为什么这么做 |
+|---|---|
+| **没有 requestAnimationFrame 循环** | 只在拖拽 / 缩放 / 悬停 / 数据变化时渲染一帧；没人操作时场景**完全静止**（不转、不呼吸、不漂移），CPU / GPU 归零 |
+| `OrbitControls.autoRotate = false` + `enableDamping = false` | 自动旋转的开关只有一个；关掉阻尼后松手立即停，没有惯性 |
+| **3000 粒子 = 1 个 `Points` + 1 个 `PointsMaterial`** | 一次 BufferGeometry 上传；半径用高斯分布（σ≈52、上限 155）→ 球心厚实、外围稀疏 |
+| **150 个节点 = 150 个 `Sprite`，共用 1 张 256×256 星芒贴图** | ⛔ 没有 `SphereGeometry`：节点是 2D 贴图，颜色靠 `SpriteMaterial.color` 染色；150 个节点只有 1 份纹理显存，重建时 `disposeTree()` 跳过 `isSprite` 的（three 内部共享）几何 |
+| 光晕 = Sprite + 一张 128×128 径向渐变贴图（共享） | 比再套一层半透明球省 draw call；贴图只生成一次，卸载统一释放 |
+| **所有连线合并成 1 个 `LineSegments`** | 每条连线单独建对象会有 300+ draw call；合并后只有 1 个，顶点色区分亮暗 |
+| 突触封顶：每节点额外度数 ≤4、额外连线 ≤180 条 | 相似度连线 + 同分类随机连线会成倍增长，不封顶几何体会爆 |
+| **节点硬上限 150**（服务端 `graph=1` 的 `MAX_GRAPH_NODES` + 客户端 `slice(0, MAX_NODES)` 双重） | 超出时按「**有效 → 核心 → 强度降序**」排序：先被裁掉的正是**已失效 / 最弱的边缘记忆**，活跃核心不会因为条数多而被挤掉 |
+| 记忆星云**按需加载**：`MemoriesModal` 用 `next/dynamic` + `memoriesOpen` 门控，内部 `MemoryGraph3D` 再套一层 dynamic | 首屏不下载 three（WebGL）；第一次点「记忆库」才拉 chunk，文件名带 hash 指纹（`_next/static/chunks/*-<hash>.js`，`immutable` 长缓存），关掉再开直接读缓存 |
+| `SpriteMaterial` / `PointsMaterial`、不用光照 / 阴影 / 后处理 | 发光感 = 贴图自带柔光 + 加法混合 (模拟 Bloom)；真上 Bloom 要整屏后处理，代价远大于收益 |
+| 拾取用"不可见放大的 Sprite"（scale ×1.3，且 `visible=false`）+ 单个 raycaster | 命中区**不参与渲染** → 每次渲染的 draw call 减半（150 节点：≈300 → ≈150）；⚠️ Raycaster **不检查 `visible`**（three 只在渲染阶段跳过），所以照样点得中 |
+| **WebGL 不可用 / 渲染出错 → 退回列表视图** | 关闭硬件加速、驱动黑名单、显存耗尽时 `new WebGLRenderer` 会直接抛异常；`MemoryGraph3D` 接住并回调 `onUnsupported`，`MemoriesModal` 再用错误边界 + 列表替身兜底（列表**不创建任何 three 对象**，开销最低，也不会白屏） |
+| 搜索 / 分类筛选只**调透明度与 scale**，不重建场景 | 重建 = 重新生成 150 个 Sprite + 连线缓冲，还会让布局闪一下 |
+| **画布透明 + CSS 深空渐变 / 星点** | 背景交给 CSS（零 WebGL 成本）；`alpha:true` + `setClearColor(0x000000, 0)` |
+| **卸载清理**：取消 rAF → `controls.dispose()` → dispose 几何/材质/贴图 → `renderer.dispose()` → `forceContextLoss()` | 弹窗反复开关最容易泄漏 WebGL 上下文 |
+| `ssr: false` 动态加载 | three 会碰 window / WebGL，不能在服务端预渲染阶段执行 |
+
+> 实测（本机 dev）：点云中心密集、外围稀疏；节点是**彩色星芒贴图**（金 / 青 / 紫 / 灰蓝）；
+> 正中心是一颗只比最亮记忆星稍大稍亮的亮白星芒（不刺眼），名字不常驻、悬停才弹「核心（暖言）」；
+> 静止时画面不动；拖拽/滚轮可用；不可见放大的 Sprite 让悬停/点击稳定命中；卸载后无 canvas 残留。
+> 代价：只需 `three` 一个依赖（`react-force-graph-3d` / `three-spritetext` 已移除），组件懒加载，不影响聊天首屏。
+
+---
+
+## 十三、2026-10：远端 MySQL 慢查询治理（会话 / 配置 / 冷启动）
+
+**现象**：日志里一条接一条的 `[db] 慢查询` ——
+
+- `SELECT ... FROM user_sessions s JOIN users u ...` **500~900ms**，几乎每个 user_* 接口都有一条；
+- `SELECT value FROM settings WHERE name = ?` **300~540ms**；
+- `CREATE TABLE IF NOT EXISTS ...` 300ms 级、一次刷几十条；
+- `/api/user/diaries`、`/api/user/conversations` 首次请求 **8~10 秒**。
+
+**根因**：全不是「SQL 本身慢」，而是**远端库的往返次数**。单次往返约 100~500ms，
+把次数乘上「每个接口都查一次」就很可观。
+
+| 根因 | 说明 |
+|---|---|
+| **每个接口都查一次登录会话** | `getCurrentUser()` 是几乎所有 `user_*` 接口的第一句。聊天页一次加载会并发 5~6 个接口 —— 同一个 token 被查 5~6 次。索引没问题（`user_sessions.token_hash` 是主键） |
+| **配置缓存太短** | `getGroup()` 只缓存 30 秒，而聊天一次要读 ai / tts / safety / sticker 等多个分组，等于每半分钟就重新付一次往返 |
+| **建表把 31 条 CREATE 全跑一遍** | `ensureTables()` 以前无条件执行全部 `CREATE TABLE IF NOT EXISTS`，每条一次往返，冷启动白等约 10 秒。`IF NOT EXISTS` 对已存在的表本来也不会更新列，跑它没有意义 |
+| **"只跑一次"用布尔标记 + 补列串行** | 7 个 `ensureXxxColumns` 串行叠加；更要命的是布尔标记要等第一轮跑完才置位，**并发进来的请求会各自再跑一整轮**（日志里同一条 CREATE TABLE 连刷好几次就是这个） |
+
+**处理**：
+
+| 改动 | 效果 |
+|---|---|
+| `lib/user-auth.js` 加会话短缓存（`token_hash` → 用户，TTL 30 秒，上限 500 条） | 同一 token 的重复查询直接消失；退出登录 / 改邮箱 / 后台改用户 / 用户改资料都**主动失效**（`invalidateUserSessionCache`） |
+| `lib/settings.js` 分组缓存 30 秒 → **5 分钟** | 后台保存时 `saveGroup()` 会 `invalidateCache(group)`，所以不影响"改完立即生效" |
+| `lib/schema.js` 的 `ensureTables()` 先查一次现有表，**只建缺的** | 冷启动少掉约 30 次往返 |
+| `ensureUserColumnsOnce()` 改成 **Promise 单例**（并发请求共享同一个任务）+ 补列步骤 `Promise.all` 并行 | 并发首屏不再重复跑升级链，串行等待压成一次往返级别 |
+| `/api/user/profile` PUT、`/api/user/email` PUT、`/api/admin/users` PUT 补 `invalidateUserSessionCache` | 保证昵称 / 头像 / AI 人格 / 封禁不被 30 秒缓存拖慢 |
+
+**实测（本机 dev + 远端库，同一临时会话）**：
+
+| 接口 | 改前 | 改后（二次请求，已排除 dev 编译） |
+|---|---|---|
+| `/api/user/memories?graph=1` | ~12s（冷）/ 1s+ | **0.27~0.48s** |
+| `/api/user/conversations` | 8~10s | **0.30s** |
+| `/api/user/profile` | 1.1~2.3s | **0.27s** |
+| `/api/user/diaries` | 8~10s | **0.16~0.41s** |
+
+> ⚠️ 首次请求仍会慢一点：dev 模式下每个路由要现场编译（`Compiling ...`），
+> 生产环境（`next build` 后）没有这部分开销，只看冷启动的升级链（现在只剩一次往返级别）。
+> ⚠️ 会话缓存 30 秒是**安全与性能的折中**：不用等缓存过期来保证"封禁生效"，
+> 所有能主动失效的入口都已经显式失效了；新增"改用户状态"的入口时别忘了调 `invalidateUserSessionCache`。
+

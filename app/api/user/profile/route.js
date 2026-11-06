@@ -10,7 +10,7 @@
 import { describeDbError, execute, query } from "@/lib/db";
 import { enqueueReview } from "@/lib/content-review";
 import { ensureUserColumnsOnce } from "@/lib/schema";
-import { getCurrentUser } from "@/lib/user-auth";
+import { getCurrentUser, invalidateUserSessionCache } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
 
 export const runtime = "nodejs";
@@ -33,6 +33,7 @@ const PROFILE_FIELDS = [
   "birthday",
   "bio",
   "ai_persona",
+  "tts_dialect",
   "status",
   "created_at",
   "last_login_at",
@@ -108,6 +109,10 @@ export async function PUT(request) {
     }
     assign("ai_persona", persona || null);
   }
+  if (typeof body.ttsDialect === "string" || typeof body.tts_dialect === "string") {
+    const dialect = cleanString(body.ttsDialect ?? body.tts_dialect, 32);
+    assign("tts_dialect", dialect || null);
+  }
 
   if (typeof body.birthday === "string") {
     const birthday = cleanString(body.birthday, 10);
@@ -140,6 +145,8 @@ export async function PUT(request) {
 
   try {
     await execute(`UPDATE users SET ${sets.join(", ")} WHERE id = ?`, [...params, user.id]);
+    // 昵称 / 头像 / AI 人格都缓存在会话里，改完要立刻失效，否则最多 30 秒内还是旧值
+    invalidateUserSessionCache(user.id);
     const profile = await loadProfile(user.id);
 
     // 资料**上面已经生效**了。下面只是把改动过的内容标成「未审核」并放进审核队列，

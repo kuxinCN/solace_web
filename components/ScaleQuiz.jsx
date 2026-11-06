@@ -13,7 +13,7 @@
  *    （见 `app/api/user/scales/route.js` 的 forClient）。
  *    它只负责"把题目渲染出来、把答案收集起来发回去"。
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const btnBase =
   "border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 rounded-xl hover:bg-[#eef4f6] hover:text-slate-900 hover:scale-[1.02] active:bg-[#dbe6ea] active:scale-[0.98] shadow-sm transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed";

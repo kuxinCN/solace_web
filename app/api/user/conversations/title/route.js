@@ -69,8 +69,18 @@ export async function POST(request) {
     if (!conversation) return jsonError("对话不存在", 404);
 
     const oldTitle = String(conversation.title || "").trim();
-    // 用户自己起过名字就不覆盖
-    if (oldTitle && !DEFAULT_TITLES.includes(oldTitle)) {
+    // 检查是否是历史原话残留（如之前 bug 导致的用户首句话直接当标题）：
+    const firstUserContent = String(messages.find((m) => m?.role === "user")?.content || "").trim();
+    const isExactUserMessage = Boolean(
+      firstUserContent &&
+      (oldTitle === firstUserContent ||
+        firstUserContent.startsWith(oldTitle) ||
+        (oldTitle.length >= 4 && firstUserContent.includes(oldTitle)))
+    );
+    const canOverride = !oldTitle || DEFAULT_TITLES.includes(oldTitle) || isExactUserMessage;
+
+    // 只有用户明确自己手动命名过（非默认、非用户原话残留），才尊重用户不覆盖
+    if (!canOverride) {
       return json({ ok: true, title: oldTitle, skipped: true });
     }
 

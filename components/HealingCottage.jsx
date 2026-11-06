@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState } from "react";
 import FirstAid from "@/components/FirstAid";
 import ScaleQuizEntry from "@/components/ScaleQuizEntry";
 import ConfirmModal from "@/components/ConfirmModal";
@@ -204,7 +204,7 @@ function pickTodayQuote() {
 
 /* ================= 组件 ================= */
 
-export default function HealingCottage({ userId, onButterflyPatChange }) {
+export default function HealingCottage({ userId, onButterflyPatChange, onWantToTalk }) {
   // mode: null=小屋首页 | "personality" | "mood"
   const [mode, setMode] = useState(null);
 
@@ -224,6 +224,8 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
     phq9: null,
     gad7: null,
   });
+  // 后端保存失败标记：以前 submitAssessment 静默吞错，结果页看着"有"，刷新就没了
+  const [saveFailed, setSaveFailed] = useState(false);
 
   // 测评历史弹窗
   const [historyModal, setHistoryModal] = useState({
@@ -237,7 +239,6 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
     confirmOpen: false,  // 删除二次确认
     msg: "",             // 行内错误提示（不用 alert）
   });
-  const historyModalRef = useRef(null);
 
   // 卡片状态**只从后端拉**（assessment_results 真实记录），不读本地缓存。
   // 挂载、提交测评后、删除历史后都调它，保证「已测评 / 未测评」与数据库条数实时一致。
@@ -310,18 +311,27 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
 
   /* ---------- 测评历史（后端持久化） ---------- */
 
-  // 提交一条测评结果到后端（静默失败，不阻断用户流程）；
-  // 成功后立刻重拉卡片状态，保证乐观展示与数据库一致
+  // 提交一条测评结果到后端（**唯一持久化入口**，不再写 localStorage / 不做本地乐观历史）：
+  //   成功 → 以数据库为准重拉卡片状态；
+  //   失败 → console.warn + 结果页给出提示，并同样重拉（卡片会如实回到"未测评"，
+  //          不会出现"界面显示已测评、刷新后消失"的错觉）。
   async function submitAssessment(type, data) {
+    setSaveFailed(false);
     try {
       const res = await fetch("/api/user/assessments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type, data }),
       });
-      if (res.ok) refreshCardStatus();
-    } catch {
-      // 静默失败：网络异常或未登录时不上报，不影响测评体验
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        throw new Error(body?.error || `HTTP ${res.status}`);
+      }
+    } catch (err) {
+      setSaveFailed(true);
+      console.warn("测评保存失败", err);
+    } finally {
+      refreshCardStatus();
     }
   }
 
@@ -416,6 +426,7 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
     setPStep(0);
     setPAnswers([]);
     setPResult(null);
+    setSaveFailed(false);
     setMode("personality");
   }
 
@@ -439,8 +450,7 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
         TYPE_INFO[type] || ["探索者", "每个人都有独特的性格组合，这是一次认识自己的小小旅行。"];
       const result = { date: todayCN(), type, name, desc };
       setPResult(result);
-      // 乐观更新卡片，随后以后端记录为准对齐（不再写 localStorage）
-      setHistory((h) => ({ ...h, personality: { date: result.date, type, name } }));
+      // 只提交后端；卡片状态等 submitAssessment 回来以后端记录为准（不再本地先写一遍）
       // 提交到后端：存 type + 四个维度的 A 选项占比（I/N/T/J 方向的百分比）
       submitAssessment("personality", {
         type,
@@ -465,6 +475,7 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
     setMStep(0);
     setMAnswers([]);
     setMResult(null);
+    setSaveFailed(false);
     setMode("mood");
   }
 
@@ -479,8 +490,7 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
       const pRes = { date, score: phq };
       const gRes = { date, score: gad };
       setMResult({ phq: pRes, gad: gRes });
-      // 乐观更新卡片；submitAssessment 成功后以后端记录为准对齐（不再写 localStorage）
-      setHistory((h) => ({ ...h, phq9: pRes, gad7: gRes }));
+      // 只提交后端；卡片状态等 submitAssessment 回来以后端记录为准（不再本地先写一遍）
       // 提交到后端：存 PHQ-9 和 GAD-7 两个分数
       // ⚠️ 额外带上 **PHQ-9 第 9 题**（自伤念头）的单题分 ——
       //    心理画像里它是"一票判高风险"的依据（见 lib/portrait.js），
@@ -547,6 +557,11 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
             <p className="text-xs text-slate-400 mt-4">
               测评日期：{pResult.date}
             </p>
+            {saveFailed && (
+              <p className="mt-2 text-xs text-[#c07a5e]">
+                结果已经出来了，但没能存进历史（网络或服务端问题）。刷新后这张卡片会如实显示未测评，稍后可以再测一次。
+              </p>
+            )}
             <div className="flex gap-2 justify-center mt-5">
               <button
                 onClick={startPersonality}
@@ -659,6 +674,11 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
             <p className="text-xs text-slate-400 text-center">
               测评日期：{mResult.phq.date}
             </p>
+            {saveFailed && (
+              <p className="mt-2 text-xs text-center text-[#c07a5e]">
+                结果已经出来了，但没能存进历史（网络或服务端问题）。刷新后这张卡片会如实显示未测评，稍后可以再测一次。
+              </p>
+            )}
             <div className="flex gap-2 justify-center mt-4">
               <button
                 onClick={startMood}
@@ -737,7 +757,7 @@ export default function HealingCottage({ userId, onButterflyPatChange }) {
       </div>
 
       {/* 原有功能：呼吸放松 / 蝴蝶拍 / 安全提示 */}
-      <FirstAid onButterflyPatChange={onButterflyPatChange} />
+      <FirstAid onButterflyPatChange={onButterflyPatChange} onWantToTalk={onWantToTalk} />
 
       {/* 测评区 */}
       <div className="px-1 pt-1">

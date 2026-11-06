@@ -1,6 +1,6 @@
 /** 当前用户端登录状态：未登录时 user 为 null */
 import { prewarmConnections } from "@/lib/ai";
-import { getCurrentUser } from "@/lib/user-auth";
+import { getCurrentUser, touchUserLastLogin } from "@/lib/user-auth";
 import { json } from "@/lib/util";
 
 export const runtime = "nodejs";
@@ -14,6 +14,7 @@ export async function GET(request) {
   if (user) {
     try {
       prewarmConnections({ ai: true });
+      void touchUserLastLogin(user.id);
     } catch {
       /* 预热失败不影响会话检查 */
     }

@@ -10,11 +10,16 @@ export default function AboutModal({ open, onClose }) {
       onClick={onClose}
     >
       <div
-        className="bg-[#fdfdfc] rounded-2xl shadow-xl border border-[#e8eae7] p-5 w-96 max-w-[90vw]"
+        className="bg-[#fdfdfc] rounded-3xl shadow-xl border border-[#e8eae7] p-6 w-96 max-w-[90vw] text-center"
         onClick={(e) => e.stopPropagation()}
       >
-        <h3 className="text-base font-bold text-slate-800 mb-3">关于 Solace</h3>
-        <div className="text-sm text-slate-600 leading-7 whitespace-pre-line mb-4">
+        <img
+          src="/logo.png"
+          alt="Solace Logo"
+          className="w-12 h-12 object-contain mx-auto mb-2.5 drop-shadow-xs"
+        />
+        <h3 className="text-base font-bold text-slate-800 mb-2">关于 Solace</h3>
+        <div className="text-xs sm:text-sm text-slate-600 leading-6 text-left whitespace-pre-line mb-5 bg-[#fafaf8] p-3.5 rounded-2xl border border-[#edf0ee]">
           {`Solace 是一个为你而生的情绪陪伴空间。
 我们不试图治疗你，也不假装懂你。
 我们只做一件事——
@@ -25,7 +30,7 @@ export default function AboutModal({ open, onClose }) {
         </div>
         <button
           onClick={onClose}
-          className="w-full border border-[#7fa8c4] bg-[#7fa8c4] text-white rounded-lg py-2 text-sm hover:bg-[#6d99b5] hover:scale-[1.02] active:scale-[0.98] transition-all duration-150"
+          className="w-full bg-gradient-to-r from-[#628ea8] to-[#557e96] text-white rounded-xl py-2.5 text-xs font-medium hover:from-[#58839d] hover:to-[#4b738a] active:scale-[0.98] transition-all duration-150"
         >
           知道了
         </button>

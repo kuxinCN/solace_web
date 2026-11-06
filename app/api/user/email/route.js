@@ -5,7 +5,7 @@
  */
 import { describeDbError, execute } from "@/lib/db";
 import { rateLimit } from "@/lib/rate-limit";
-import { getCurrentUser } from "@/lib/user-auth";
+import { getCurrentUser, invalidateUserSessionCache } from "@/lib/user-auth";
 import { cleanString, json, jsonError, readJsonBody } from "@/lib/util";
 
 export const runtime = "nodejs";
@@ -40,6 +40,8 @@ export async function PUT(request) {
     await execute("UPDATE users SET email = ? WHERE id = ?", [email, user.id]);
     // 邮箱变了，旧的登录凭据作废
     await execute("DELETE FROM user_sessions WHERE user_id = ?", [user.id]);
+    // 会话缓存也要一起清，否则这 30 秒内旧 token 还会被当成已登录
+    invalidateUserSessionCache(user.id);
 
     return json({ ok: true, message: "邮箱已修改，请用新邮箱重新登录" });
   } catch (err) {

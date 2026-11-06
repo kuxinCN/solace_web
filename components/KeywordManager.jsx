@@ -129,8 +129,6 @@ export default function KeywordManager({ api, setError, setNotice }) {
     load();
   }, [load]);
 
-  const editing = groups.find((group) => group.id === editingId) || null;
-
   function startEdit(group) {
     setEditingId(group.id);
     setDraft(contentToText(group));

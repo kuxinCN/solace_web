@@ -19,12 +19,6 @@
 import { useCallback, useEffect, useState } from "react";
 import FirstAid from "@/components/FirstAid";
 
-/** 方式 id → FirstAid 里对应的条目 id */
-const METHOD_TO_KIT = {
-  breathing: "breath",
-  butterfly: "butterfly",
-};
-
 export default function RelaxPopup({ popup, onRespond, onDone, api }) {
   /** "" = 提示阶段；否则是正在做的方式 */
   const [activeMethod, setActiveMethod] = useState("");
@@ -107,10 +101,7 @@ export default function RelaxPopup({ popup, onRespond, onDone, api }) {
           </div>
 
           {/* ⚠️ 复用「治愈小屋」里的那套动画组件 —— 不重写一份 */}
-          <FirstAid
-            initialMethod={activeMethod}
-            allowedIds={Object.values(METHOD_TO_KIT)}
-          />
+          <FirstAid initialMethod={activeMethod} />
         </div>
       </div>
     );

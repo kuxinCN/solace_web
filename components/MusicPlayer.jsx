@@ -270,8 +270,15 @@ export default function MusicPlayer() {
   }, [expanded]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!data || !musicConfig.enabled) return null;
-  // 后台和安装页不显示播放器
-  if (pathname?.startsWith("/admin") || pathname?.startsWith("/install")) return null;
+  // 宣传落地页（根路径 / 与 /home）、后台与安装页不显示音乐悬浮播放器
+  if (
+    pathname === "/" ||
+    pathname === "/home" ||
+    pathname?.startsWith("/admin") ||
+    pathname?.startsWith("/install")
+  ) {
+    return null;
+  }
   if (!tracks.length && !neteaseTracks.length) return null;
 
   // 音源设置是「本地歌单」，但一首可播的本地歌都没有、却配了网易云歌 ——
@@ -312,11 +319,11 @@ export default function MusicPlayer() {
             setExpanded(true);
           }}
           title="背景音乐（可以拖动）"
-          className={`relative w-10 h-10 cursor-grab touch-none rounded-full bg-white/90 backdrop-blur border border-[#d5d9d7] shadow-md flex items-center justify-center text-slate-500 hover:text-slate-800 hover:bg-white transition-colors ${
+          className={`relative w-11 h-11 cursor-grab touch-none rounded-full bg-[#FFF9F6]/95 dark:bg-[#27211E] backdrop-blur-md border border-[#eddcd2] dark:border-[#3E342D] shadow-md shadow-[#b85a3c]/10 flex items-center justify-center text-[#b85a3c] dark:text-[#EFA896] hover:bg-white dark:hover:bg-[#332A24] hover:scale-105 active:scale-95 transition-all ${
             ball.dragging ? "cursor-grabbing" : ""
           }`}
         >
-          <span className={playing ? "animate-pulse" : ""}>♪</span>
+          <span className={playing ? "animate-pulse font-bold" : ""}>♪</span>
           {/* ⚠️ 播放出错时给个红点：面板收起状态下 errorMsg 在屏外，用户根本看不到 ——
               没这个点的话，"手机上点了没动静"就完全无从下手（展开面板才能看到原因） */}
           {errorMsg ? (
@@ -335,7 +342,7 @@ export default function MusicPlayer() {
       <div
         className={
           expanded
-            ? "w-80 rounded-2xl bg-white/95 backdrop-blur shadow-xl border border-[#e6e8e6] overflow-hidden"
+            ? "w-80 rounded-2xl bg-[#FFFDFB]/95 dark:bg-[#231E1B]/95 backdrop-blur-md shadow-2xl border border-[#efe3d8] dark:border-[#382F28] overflow-hidden text-slate-800 dark:text-[#F5DCD3]"
             : "pointer-events-none absolute -left-[9999px] top-0 w-80 opacity-0"
         }
         aria-hidden={!expanded}
@@ -350,17 +357,17 @@ export default function MusicPlayer() {
           <div
             {...ball.handlers}
             title="按住这里可以拖动"
-            className={`flex touch-none items-center justify-between border-b border-[#f0f2f0] py-2.5 pl-3 pr-2 ${
+            className={`flex touch-none items-center justify-between border-b border-[#f0f2f0] dark:border-[#332A24] py-2.5 pl-3 pr-2 ${
               ball.dragging ? "cursor-grabbing" : "cursor-grab"
             }`}
           >
-            <span className="text-xs font-medium text-slate-600">
+            <span className="text-xs font-medium text-slate-600 dark:text-[#C4B4AB]">
               {showNetease ? "网易云收藏" : "背景音乐"}
             </span>
             <div className="flex shrink-0 items-center gap-2">
               {fellBack ? (
                 <span
-                  className="text-[10px] text-amber-600"
+                  className="text-[10px] text-amber-600 dark:text-amber-400"
                   title="已自动切到本地歌单 —— 因为探测到当前网络访问不了网易云（music.163.com）。如果你能正常打开网易云，可以在后台把「网易云访问不了时自动降级」关掉"
                 >
                   已切到本地
@@ -368,7 +375,7 @@ export default function MusicPlayer() {
               ) : null}
               {autoNetease ? (
                 <span
-                  className="text-[10px] text-amber-600"
+                  className="text-[10px] text-amber-600 dark:text-amber-400"
                   title="本地歌单里没有可播的歌，已自动显示网易云收藏"
                 >
                   本地无歌曲
@@ -384,7 +391,7 @@ export default function MusicPlayer() {
                   setListOpen(false);
                 }}
                 title="收起"
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/5 text-sm leading-none text-slate-400 transition-colors hover:bg-black/10 hover:text-slate-600"
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-black/5 dark:bg-white/10 text-sm leading-none text-slate-400 dark:text-[#C4B4AB] transition-colors hover:bg-black/10 dark:hover:bg-white/20 hover:text-slate-600 dark:hover:text-[#F5DCD3]"
               >
                 ×
               </button>
@@ -491,7 +498,7 @@ export default function MusicPlayer() {
                   type="button"
                   onClick={toggle}
                   disabled={!current}
-                  className="w-10 h-10 rounded-full bg-[#7fa3b8] text-white flex items-center justify-center hover:bg-[#6d92a8] disabled:opacity-40 transition-colors"
+                  className="w-11 h-11 rounded-full bg-gradient-to-r from-[#c06b50] to-[#b85a3c] text-white flex items-center justify-center shadow-sm shadow-[#b85a3c]/25 hover:from-[#b05f45] hover:to-[#a84f33] active:scale-95 disabled:opacity-40 transition-all cursor-pointer"
                   title={playing ? "暂停" : "播放"}
                 >
                   {playing ? "⏸" : "▶"}
@@ -500,7 +507,7 @@ export default function MusicPlayer() {
                   type="button"
                   onClick={() => switchTo(index + 1)}
                   disabled={tracks.length <= 1}
-                  className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-[#f1f5f7] disabled:opacity-30 transition-colors"
+                  className="w-8 h-8 rounded-full flex items-center justify-center text-slate-500 hover:bg-[#FAF7F4] disabled:opacity-30 transition-colors"
                   title="下一首"
                 >
                   ⏭
@@ -516,14 +523,14 @@ export default function MusicPlayer() {
                   step="0.05"
                   value={volume}
                   onChange={(e) => setVolume(Number(e.target.value))}
-                  className="flex-1 accent-[#7fa3b8]"
+                  className="flex-1 accent-[#b85a3c]"
                 />
               </div>
 
               <button
                 type="button"
                 onClick={() => setListOpen((v) => !v)}
-                className="w-full mt-3 text-xs text-slate-500 hover:text-slate-700 py-1.5 rounded-lg hover:bg-[#f1f5f7] transition-colors"
+                className="w-full mt-3 text-xs text-slate-500 hover:text-slate-700 py-1.5 rounded-lg hover:bg-[#FAF7F4] transition-colors cursor-pointer"
               >
                 {listOpen ? "收起歌单" : `歌单（${tracks.length} 首）`}
               </button>
@@ -535,10 +542,10 @@ export default function MusicPlayer() {
                       <button
                         type="button"
                         onClick={() => switchTo(i)}
-                        className={`w-full text-left text-xs px-2 py-1.5 rounded-lg truncate transition-colors ${
+                        className={`w-full text-left text-xs px-2 py-1.5 rounded-lg truncate transition-colors cursor-pointer ${
                           i === index
-                            ? "bg-[#e3edf3] text-slate-800"
-                            : "text-slate-600 hover:bg-[#f1f5f7]"
+                            ? "bg-[#FFF5EF] text-[#b85a3c] font-medium"
+                            : "text-slate-600 hover:bg-[#FAF7F4]"
                         }`}
                       >
                         {i + 1}. {item.title}

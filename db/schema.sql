@@ -210,6 +210,8 @@ CREATE TABLE IF NOT EXISTS `diaries` (
   `title`      VARCHAR(120) NOT NULL DEFAULT '无题',
   `content`    MEDIUMTEXT NOT NULL,
   `mood`       VARCHAR(16)  NULL COMMENT '情绪标签（AI 打标）',
+  `source`     VARCHAR(8)   NOT NULL DEFAULT 'user' COMMENT '作者：user=用户自己写 / ai=暖言生成',
+  `diary_date` DATE         NULL COMMENT '这篇日记写的是哪一天（AI 日记用；用户日记为空）',
   `is_pinned`    TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 表示已置顶',
   `is_favorited` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 表示已收藏',
   `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -224,12 +226,27 @@ CREATE TABLE IF NOT EXISTS `user_memories` (
   `user_id`    INT UNSIGNED NOT NULL,
   `content`    VARCHAR(200) NOT NULL COMMENT '一条长期记忆，如"她养了一只叫团子的猫"',
   `category`   VARCHAR(32)  NULL COMMENT '分类标签，可为空',
+  `superseded_at` DATETIME  NULL COMMENT '失效时间：被更新的状态取代后不再注入（可在记忆库恢复）',
+  `strength`   INT          NOT NULL DEFAULT 100 COMMENT '记忆强度 0~100：越低越接近遗忘（见 lib/memory-decay.js）',
+  `last_accessed_at` DATETIME NULL DEFAULT CURRENT_TIMESTAMP COMMENT '最后一次被读取或提及的时间（衰减看它，唤醒刷新它）',
   `created_at` DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_memory_user` (`user_id`, `created_at`),
   CONSTRAINT `fk_memory_user` FOREIGN KEY (`user_id`)
     REFERENCES `users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户长期记忆';
+
+CREATE TABLE IF NOT EXISTS `memory_stats_daily` (
+  `user_id`           INT UNSIGNED NOT NULL,
+  `stat_date`         DATE         NOT NULL,
+  `inject_requests`   INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '发生记忆注入的聊天次数',
+  `inject_facts`      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '累计注入的记忆条数',
+  `inject_chars`      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '累计注入字符数',
+  `compact_runs`      INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '压缩成功次数',
+  `compacted_rows`    INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '被压缩（标记失效）的条数',
+  PRIMARY KEY (`user_id`, `stat_date`),
+  KEY `idx_memory_stats_date` (`stat_date`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='长期记忆观测指标（按天聚合）';
 
 CREATE TABLE IF NOT EXISTS `trash` (
   `id`         INT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -306,7 +323,7 @@ CREATE TABLE IF NOT EXISTS `music_tracks` (
 CREATE TABLE IF NOT EXISTS `assessment_results` (
   `id`          INT UNSIGNED NOT NULL AUTO_INCREMENT,
   `user_id`     INT UNSIGNED NOT NULL,
-  `type`        VARCHAR(16)  NOT NULL COMMENT 'personality=性格倾向 / emotion=情绪自评',
+  `type`        VARCHAR(64)  NOT NULL COMMENT 'personality=性格倾向 / emotion=情绪自评 / 题库 id（最长 63 字符）',
   `data`        JSON         NOT NULL COMMENT '{"I":78,"N":82,"T":65,"P":71} 或 {"phq9":12,"gad7":9}',
   `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),

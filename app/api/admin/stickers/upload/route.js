@@ -11,7 +11,6 @@
  *
  * 安全同前：扩展名白名单 + **魔数嗅探**（拒收"改名成 .jpg 的 SVG/HTML"）+ 2MB 上限。
  */
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { getAdminFromRequest, logAudit } from "@/lib/admin-auth";

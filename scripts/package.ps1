@@ -1,4 +1,4 @@
-﻿# ============================================================================
+# ============================================================================
 # Solace 打包脚本（Windows 上用）
 # ----------------------------------------------------------------------------
 # 作用：把项目打成一个「可以直接上传到服务器」的 zip，自动排除掉
@@ -49,8 +49,13 @@ try {
 
     # 排除目录：依赖、构建产物、日志、版本库
     $excludeDirs = @("node_modules", ".next", ".vercel", "logs", ".git")
-    # 排除文件：密钥与运行期生成的（传到新服务器会泄密或造成误判）
-    $excludeFiles = @(".env.local", ".env.production", "db.json", "installed.lock")
+    # 排除文件：密钥与运行期文件，以及不必要上传到生产服务器的内部开发、事故复盘、竞赛技术报告与脚本（本地完全保留）
+    $excludeFiles = @(
+        ".env.local", ".env.production", "db.json", "installed.lock", "*.zip",
+        "AGENTS.md", "DEPLOY.md", "INCIDENTS.md", "DEV-HISTORY.md", "OPTIMIZATION-TODO.md",
+        "STRESS-AGENT-PROMPT.md", "DEPLOY-CHECKLIST.md", "MEMORY-REVIEW-*.md",
+        "TECH-REPORT.*", "*.pdf", "VIDEO-SCRIPT.md", "generate-pdf.js"
+    )
 
     $robocopyArgs = @($root, $temp, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
     # ⚠️ 排除**目录**必须写完整路径。
@@ -79,8 +84,9 @@ try {
     #   这里只按「**顶层**目录」排除，与上面改好后的全路径 /XD 等价。
     $expected = @(Get-ChildItem -LiteralPath $root -Recurse -File -Force | Where-Object {
             $rel = $_.FullName.Substring($root.Length + 1)
-            -not ($excludeDirs | Where-Object { $rel.StartsWith($_ + "\") }) -and
-            $excludeFiles -notcontains $_.Name
+            $dirExcluded = [bool]($excludeDirs | Where-Object { $rel.StartsWith($_ + "\") })
+            $fileExcluded = [bool]($excludeFiles | Where-Object { $name = $_; $file = $rel; $file -like "*\$name" -or $_ -like $name -or $rel -eq $name })
+            -not $dirExcluded -and -not $fileExcluded
         }).Count
     if ($count -lt $expected) {
         throw "打包缺文件：临时目录 $count 个，按顶层排除规则应有 $expected 个。多半是排除项写成了裸目录名，误伤了同名的业务目录（历史上 app/api/admin/logs 就是这样被丢掉的）。"

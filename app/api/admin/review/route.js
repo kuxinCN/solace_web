@@ -765,7 +765,6 @@ export async function POST(request) {
       ];
 
       let lastStatus = 0;
-      let lastRaw = "";
       let success = null;
 
       for (const attempt of attempts) {
@@ -782,7 +781,6 @@ export async function POST(request) {
         });
         const bcText = await bcRes.text();
         lastStatus = bcRes.status;
-        lastRaw = bcText;
 
         steps.push({
           step: `③ 创建批次 — ${attempt.name}`,

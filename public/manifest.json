@@ -1,0 +1,56 @@
+{
+  "name": "Solace 情绪陪伴空间",
+  "short_name": "Solace",
+  "description": "给每一个不想说话的灵魂，一点温和的慰藉。",
+  "start_url": "/chat",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1C1917",
+  "theme_color": "#1C1917",
+  "orientation": "portrait-primary",
+  "lang": "zh-CN",
+  "categories": ["lifestyle", "health"],
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "shortcuts": [
+    {
+      "name": "倾诉聊天",
+      "short_name": "聊天",
+      "description": "开启温暖对话",
+      "url": "/chat",
+      "icons": [{ "src": "/logo.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "我的日记",
+      "short_name": "日记",
+      "description": "写下今天的心情",
+      "url": "/chat?tab=diary",
+      "icons": [{ "src": "/logo.png", "sizes": "192x192" }]
+    }
+  ]
+}
+

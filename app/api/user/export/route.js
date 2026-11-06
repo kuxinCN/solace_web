@@ -1,3 +1,4 @@
+import { decryptContent } from "@/lib/secret-box";
 /**
  * 数据导出：GET /api/user/export
  *
@@ -86,6 +87,14 @@ export async function GET(request) {
       [user.id]
     );
   }
+
+  messages.forEach((m) => {
+    m.content = decryptContent(m.content);
+  });
+  diaries.forEach((d) => {
+    d.title = decryptContent(d.title);
+    d.content = decryptContent(d.content);
+  });
 
   const payload = {
     exportedAt: new Date().toISOString(),

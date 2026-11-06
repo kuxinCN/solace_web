@@ -1,5 +1,6 @@
 "use client";
 
+import { clearAllLocalChatState } from "@/lib/message-cache";
 import { useCallback, useEffect, useState } from "react";
 import NicknameEditor from "@/components/NicknameEditor";
 import ImageCropper from "@/components/ImageCropper";
@@ -50,10 +51,10 @@ function todayStr() {
 }
 
 const btnBase =
-  "border border-[#d5d9d7] bg-[#fdfdfc] text-slate-700 rounded-lg hover:bg-[#e8eff2] hover:text-slate-900 active:bg-[#dbe6ea] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed";
+  "border border-[#d5d9d7] dark:border-[#3a322d] bg-[#fdfdfc] dark:bg-[#2c2420] text-slate-700 dark:text-[#F5DCD3] rounded-lg hover:bg-[#e8eff2] dark:hover:bg-[#382f2a] hover:text-slate-900 dark:hover:text-white active:bg-[#dbe6ea] dark:active:bg-[#221b18] active:scale-[0.98] transition-all duration-150 disabled:opacity-50 disabled:cursor-not-allowed shadow-2xs";
 
 const inputClass =
-  "w-full border border-[#d5d9d7] bg-white p-2 text-sm text-gray-800 placeholder-gray-400 rounded-lg transition-colors duration-150 focus:outline-none focus:border-[#8fb3c7] focus:ring-1 focus:ring-[#8fb3c7]";
+  "w-full border border-[#d5d9d7] dark:border-[#3a322d] bg-white dark:bg-[#1a1614] p-2 text-sm text-slate-800 dark:text-[#F5DCD3] placeholder-gray-400 dark:placeholder-[#7e6f66] rounded-lg transition-colors duration-150 focus:outline-none focus:border-[#8fb3c7] dark:focus:border-[#e2a68c] focus:ring-1 focus:ring-[#8fb3c7] dark:focus:ring-[#e2a68c]/30 shadow-2xs";
 
 // 个人资料内容视图：从 ProfileModal 抽取
 // props: user, profile, onSaved, onSignOut（onSignOut 仅在未传 hideSignOut 时渲染退出按钮）
@@ -76,6 +77,8 @@ export default function ProfileView({
   const [gender, setGender] = useState(profile?.gender || "");
   const [birthday, setBirthday] = useState(profile?.birthday || "");
   const [persona, setPersona] = useState(profile?.ai_persona || "");
+  const [ttsDialect, setTtsDialect] = useState(profile?.tts_dialect || "");
+  const [supportDialect, setSupportDialect] = useState(false);
   const [dangerBusy, setDangerBusy] = useState("");
   // 修改密码弹窗（五项校验 + 邮箱验证码）
   const [pwdAsk, setPwdAsk] = useState(false);
@@ -93,11 +96,6 @@ export default function ProfileView({
   const [newEmail, setNewEmail] = useState("");
   const [emailLoading, setEmailLoading] = useState(false);
 
-  // 密码修改
-  const [pwdEditing, setPwdEditing] = useState(false);
-  const [newPwd, setNewPwd] = useState("");
-  const [pwdLoading, setPwdLoading] = useState(false);
-
   // 头像上传：复用共享 hook
   const avatar = useAvatarUpload({
     kind: "avatar",
@@ -114,7 +112,36 @@ export default function ProfileView({
     setGender(profile?.gender || "");
     setBirthday(profile?.birthday || "");
     setPersona(profile?.ai_persona || "");
+    setTtsDialect(profile?.tts_dialect || "");
   }, [profile]);
+
+  // 查询后台是否启用了百炼 DashScope（仅启用百炼时向用户展示方言设置）
+  useEffect(() => {
+    fetch("/api/tts/config")
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.ok && data.tts?.enabled && data.tts?.isDashScope) {
+          setSupportDialect(true);
+        } else {
+          setSupportDialect(false);
+        }
+      })
+      .catch(() => setSupportDialect(false));
+  }, []);
+
+  async function handlePickDialect(nextDialect) {
+    setTtsDialect(nextDialect);
+    try {
+      await apiRequest("/api/user/profile", {
+        method: "PUT",
+        body: { ttsDialect: nextDialect },
+      });
+      setMsg(nextDialect ? `语音偏好已设为「${nextDialect}」` : "已恢复普通话朗读");
+      onSaved?.();
+    } catch (err) {
+      setMsg("保存方言失败：" + err.message);
+    }
+  }
 
   // 保存性别和生日（保存前校验生日合法性）
   async function handleSaveProfile() {
@@ -138,6 +165,12 @@ export default function ProfileView({
         body: { gender, birthday },
       });
       setMsg("保存成功");
+      // 通知聊天页做生日判断（是不是今天、要不要防重复，全由聊天页统一管）
+      // ⚠️ 放在 onSaved 之前：onSaved 会异步重拉资料触发"打开页面"那条判断，
+      //    先派发事件能让"保存即祝福"先占住 localStorage 标记，避免同一天发两遍
+      window.dispatchEvent(
+        new CustomEvent("birthday-saved", { detail: { birthday } })
+      );
       onSaved?.();
     } catch (err) {
       setMsg("保存失败：" + err.message);
@@ -167,6 +200,7 @@ export default function ProfileView({
       setEmailLoading(false);
     }
     try {
+      try { clearAllLocalChatState(); } catch {}
       await apiRequest("/api/auth/logout", { method: "POST" });
     } catch {}
     sessionStorage.setItem(
@@ -174,29 +208,6 @@ export default function ProfileView({
       "邮箱已修改，请用新邮箱重新登录"
     );
     window.location.href = "/login";
-  }
-
-  // 修改密码：成功后提示，不退出登录
-  async function handleUpdatePassword() {
-    if (newPwd.length < 6) {
-      setMsg("密码至少 6 位");
-      return;
-    }
-    setPwdLoading(true);
-    setMsg("");
-    try {
-      await apiRequest("/api/user/password", {
-        method: "PUT",
-        body: { password: newPwd },
-      });
-      setMsg("密码修改成功");
-      setPwdEditing(false);
-      setNewPwd("");
-    } catch (err) {
-      setMsg("密码修改失败：" + err.message);
-    } finally {
-      setPwdLoading(false);
-    }
   }
 
   // 切换 AI 人格：点一下立即保存（这是高频操作，不再让用户点第二次按钮）
@@ -270,10 +281,10 @@ export default function ProfileView({
     <div className="flex flex-col">
       {/* 头像（设置页用 hideAvatar 隐藏，改由封面头像入口承担） */}
       {!hideAvatar && (
-        <div className="flex flex-col items-center pb-3 border-b border-[#e8eae7]">
+        <div className="flex flex-col items-center pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
           <button
             onClick={avatar.openPicker}
-            className="relative w-20 h-20 rounded-full overflow-hidden border border-[#d5d9d7] hover:opacity-80 transition-opacity"
+            className="relative w-20 h-20 rounded-full overflow-hidden border border-[#d5d9d7] dark:border-[#3a322d] hover:opacity-80 transition-opacity"
             title="点击更换头像"
           >
             {avatar.avatarUrl ? (
@@ -290,7 +301,7 @@ export default function ProfileView({
               </div>
             )}
           </button>
-          <p className="text-xs text-slate-400 mt-2">点击头像可更换</p>
+          <p className="text-xs text-slate-400 dark:text-[#8e7f77] mt-2">点击头像可更换</p>
           <input
             ref={avatar.fileRef}
             type="file"
@@ -302,15 +313,15 @@ export default function ProfileView({
       )}
 
       {/* 昵称：复用 NicknameEditor */}
-      <div className="pb-3 border-b border-[#e8eae7]">
-        <p className="text-sm text-gray-600 mb-1">昵称</p>
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
+        <p className="text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-1">昵称</p>
         <NicknameEditor onSaved={onSaved} />
       </div>
 
       {/* 个性签名：样式与昵称/性别/生日一致，保存逻辑由父组件提供 */}
       {onSaveBio && (
-        <div className="pb-3 border-b border-[#e8eae7]">
-          <label className="block text-sm text-gray-600 mb-1">个性签名</label>
+        <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
+          <label className="block text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-1">个性签名</label>
           <input
             type="text"
             value={bioValue}
@@ -343,8 +354,8 @@ export default function ProfileView({
       )}
 
       {/* 性别 */}
-      <div className="pb-3 border-b border-[#e8eae7]">
-        <label className="block text-sm text-gray-600 mb-1">性别</label>
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
+        <label className="block text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-1">性别</label>
         <select
           value={gender}
           onChange={(e) => setGender(e.target.value)}
@@ -359,16 +370,16 @@ export default function ProfileView({
 
       {/* AI 提示词性别：两个选项直接切换，选完立即保存 */}
       {/* ⚠️ 这是给 AI「提示词」选的性别，和用户本人的性别完全无关 */}
-      <div className="pb-3 border-b border-[#e8eae7]">
-        <label className="block text-sm text-gray-600 mb-1">AI 提示词性别</label>
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
+        <label className="block text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-1">AI 提示词性别</label>
         <div className="flex gap-2">
           <button
             type="button"
             onClick={() => handlePickPersona("female")}
             className={`flex-1 p-2 rounded-lg border text-sm transition-colors ${
               persona === "female"
-                ? "border-[#a9c6da] bg-[#e3edf3] text-slate-800 font-medium"
-                : "border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 hover:bg-[#f1f5f7]"
+                ? "border-[#a9c6da] dark:border-[#8e4835] bg-[#e3edf3] dark:bg-[#3d2720] text-slate-800 dark:text-[#FEECE5] font-medium shadow-2xs"
+                : "border-[#d5d9d7] dark:border-[#3a322d] bg-[#fdfdfc] dark:bg-[#241e1b] text-slate-500 dark:text-[#a3948b] hover:bg-[#f1f5f7] dark:hover:bg-[#2f2723]"
             }`}
           >
             她（温柔的女性朋友）
@@ -378,22 +389,48 @@ export default function ProfileView({
             onClick={() => handlePickPersona("male")}
             className={`flex-1 p-2 rounded-lg border text-sm transition-colors ${
               persona === "male"
-                ? "border-[#a9c6da] bg-[#e3edf3] text-slate-800 font-medium"
-                : "border-[#d5d9d7] bg-[#fdfdfc] text-slate-500 hover:bg-[#f1f5f7]"
+                ? "border-[#a9c6da] dark:border-[#8e4835] bg-[#e3edf3] dark:bg-[#3d2720] text-slate-800 dark:text-[#FEECE5] font-medium shadow-2xs"
+                : "border-[#d5d9d7] dark:border-[#3a322d] bg-[#fdfdfc] dark:bg-[#241e1b] text-slate-500 dark:text-[#a3948b] hover:bg-[#f1f5f7] dark:hover:bg-[#2f2723]"
             }`}
           >
             他（温和的男性朋友）
           </button>
         </div>
-        <p className="text-xs text-slate-400 mt-1">
+        <p className="text-xs text-slate-400 dark:text-[#8e7f77] mt-1">
           这只决定 AI 用什么身份和你说话（决定用哪一份提示词），**和你的性别无关**。
           选完立即生效，也可以在聊天输入框旁随时切换。
         </p>
       </div>
 
+      {/* 语音朗读方言（仅当后台启用百炼 DashScope 时展示） */}
+      {supportDialect && (
+        <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
+          <label className="block text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-1">语音朗读方言 / 口音</label>
+          <select
+            value={ttsDialect}
+            onChange={(e) => handlePickDialect(e.target.value)}
+            className={inputClass}
+          >
+            <option value="">普通话（默认）</option>
+            <option value="粤语">粤语（广东话）</option>
+            <option value="四川话">四川话（西南官话）</option>
+            <option value="东北话">东北话</option>
+            <option value="上海话">上海话（吴语）</option>
+            <option value="陕西话">陕西话</option>
+            <option value="河南话">河南话</option>
+            <option value="天津话">天津话</option>
+            <option value="山东话">山东话</option>
+            <option value="台湾腔">台湾腔（闽南口音）</option>
+          </select>
+          <p className="text-xs text-slate-400 dark:text-[#8e7f77] mt-1">
+            由通义千问语音大模型提供支持，选择后 AI 朗读时将使用该方言为您说话。
+          </p>
+        </div>
+      )}
+
       {/* 生日 */}
-      <div className="pb-3 border-b border-[#e8eae7]">
-        <label className="block text-sm text-gray-600 mb-1">生日</label>
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
+        <label className="block text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-1">生日</label>
         <input
           type="date"
           value={birthday}
@@ -403,7 +440,7 @@ export default function ProfileView({
           onKeyDown={(e) => e.preventDefault()}
           className={inputClass}
         />
-        <p className="text-xs text-slate-500 mt-1">
+        <p className="text-xs text-slate-500 dark:text-[#9e8f86] mt-1">
           {formatBirthday(birthday)}
         </p>
       </div>
@@ -418,9 +455,9 @@ export default function ProfileView({
       </button>
 
       {/* 邮箱 */}
-      <div className="pb-3 border-b border-[#e8eae7]">
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
         <div className="flex items-center justify-between">
-          <label className="text-sm text-gray-600">邮箱</label>
+          <label className="text-sm text-slate-700 dark:text-[#d8c7be] font-medium">邮箱</label>
           <button
             onClick={() => {
               setEmailEditing(!emailEditing);
@@ -431,7 +468,7 @@ export default function ProfileView({
             修改
           </button>
         </div>
-        <p className="text-sm text-slate-800 mt-1 break-all">
+        <p className="text-sm text-slate-800 dark:text-[#F5DCD3] mt-1 break-all">
           {user?.email || "未设置"}
         </p>
         {emailEditing && (
@@ -470,9 +507,9 @@ export default function ProfileView({
       </div>
 
       {/* 密码 */}
-      <div className="pb-3 border-b border-[#e8eae7]">
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24]">
         <div className="flex items-center justify-between">
-          <label className="text-sm text-gray-600">密码</label>
+          <label className="text-sm text-slate-700 dark:text-[#d8c7be] font-medium">密码</label>
           <button
             onClick={() => {
               setPwdAsk(true);
@@ -483,13 +520,13 @@ export default function ProfileView({
             修改
           </button>
         </div>
-        <p className="text-sm text-slate-800 mt-1">******</p>
+        <p className="text-sm text-slate-800 dark:text-[#F5DCD3] mt-1">******</p>
         {/* 修改密码已改成弹窗：原密码 + 邮箱验证码 + 两次新密码，见 ChangePasswordModal */}
       </div>
 
       {/* 我的数据：回收站 + 导出 */}
-      <div className="pb-3 border-b border-[#e8eae7] mt-3">
-        <label className="block text-sm text-gray-600 mb-2">我的数据</label>
+      <div className="pb-3 border-b border-[#e8eae7] dark:border-[#332A24] mt-3">
+        <label className="block text-sm text-slate-700 dark:text-[#d8c7be] font-medium mb-2">我的数据</label>
         <button
           type="button"
           onClick={() => setTrashOpen(true)}
@@ -504,23 +541,23 @@ export default function ProfileView({
         >
           导出我的全部数据（JSON）
         </button>
-        <p className="text-xs text-slate-400 mt-1">
+        <p className="text-xs text-slate-400 dark:text-[#8e7f77] mt-1">
           下载一份包含你所有对话、消息、日记的文件；密码与图片不包含在内
         </p>
       </div>
 
       {/* 危险操作：注销账号 */}
       <div className="pb-3 mt-3">
-        <label className="block text-sm text-red-600 mb-2">危险操作</label>
+        <label className="block text-sm text-red-600 dark:text-red-400 font-medium mb-2">危险操作</label>
         <button
           type="button"
           onClick={handleDeleteAccount}
           disabled={dangerBusy === "delete"}
-          className="w-full p-2 text-sm rounded-lg border border-[#e5c9c9] bg-[#fdf6f6] text-red-600 hover:bg-[#fbecec] transition-colors disabled:opacity-50"
+          className="w-full p-2 text-sm rounded-lg border border-[#e5c9c9] dark:border-red-900/50 bg-[#fdf6f6] dark:bg-red-950/20 text-red-600 dark:text-red-400 hover:bg-[#fbecec] dark:hover:bg-red-950/30 transition-colors disabled:opacity-50 shadow-2xs"
         >
           {dangerBusy === "delete" ? "注销中..." : "注销账号（删除全部数据）"}
         </button>
-        <p className="text-xs text-slate-400 mt-1">
+        <p className="text-xs text-slate-400 dark:text-[#8e7f77] mt-1">
           注销后数据无法恢复，请谨慎操作
         </p>
       </div>
@@ -539,15 +576,15 @@ export default function ProfileView({
       {/* 注销账号确认弹窗：风格与站内其他确认框保持一致 */}
       {dangerAsk ? (
         <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/30 px-6">
-          <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-xl">
+          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-[#231E1B] border border-[#e8eae7] dark:border-[#382F28] p-5 shadow-xl">
             <h3 className="text-sm font-bold text-red-600">注销账号</h3>
-            <p className="mt-2 text-xs leading-relaxed text-slate-600">
+            <p className="mt-2 text-xs leading-relaxed text-slate-600 dark:text-[#d8c7be]">
               注销后，你的账号、全部对话、消息、日记都会被
               <span className="text-red-500">永久删除，无法恢复</span>。
             </p>
-            <p className="mt-3 text-xs text-slate-500">
+            <p className="mt-3 text-xs text-slate-500 dark:text-[#9e8f86]">
               如果确定，请准确输入：
-              <span className="ml-1 rounded bg-[#f4f6f5] px-1.5 py-0.5 font-mono text-slate-700">
+              <span className="ml-1 rounded bg-[#f4f6f5] dark:bg-[#2d2420] px-1.5 py-0.5 font-mono text-slate-700 dark:text-[#F5DCD3]">
                 注销我的账号
               </span>
             </p>
@@ -555,7 +592,7 @@ export default function ProfileView({
               autoFocus
               value={dangerInput}
               onChange={(e) => setDangerInput(e.target.value)}
-              className="mt-2 w-full rounded-lg border border-[#d5d9d7] bg-[#fdfdfc] px-3 py-2 text-sm outline-none focus:border-[#a9c6da]"
+              className="mt-2 w-full rounded-lg border border-[#d5d9d7] dark:border-[#3a322d] bg-[#fdfdfc] dark:bg-[#1a1614] px-3 py-2 text-sm text-slate-800 dark:text-[#F5DCD3] placeholder-gray-400 dark:placeholder-[#7e6f66] outline-none focus:border-[#a9c6da] dark:focus:border-[#e2a68c]"
               placeholder="在这里输入上面那句话"
             />
             <div className="mt-4 flex justify-end gap-2">
@@ -566,7 +603,7 @@ export default function ProfileView({
                   setDangerAsk(false);
                   setDangerInput("");
                 }}
-                className="rounded-lg border border-[#d5d9d7] px-3 py-1.5 text-xs text-slate-600 transition-colors hover:bg-[#f2f5f4] disabled:opacity-50"
+                className="rounded-lg border border-[#d5d9d7] dark:border-[#3a322d] bg-[#fdfdfc] dark:bg-[#2c2420] px-3 py-1.5 text-xs text-slate-600 dark:text-[#F5DCD3] transition-colors hover:bg-[#f2f5f4] dark:hover:bg-[#382f2a] disabled:opacity-50"
               >
                 取消
               </button>
@@ -585,7 +622,7 @@ export default function ProfileView({
 
       {/* 提示信息 */}
       {msg && (
-        <p className="text-sm text-red-500 text-center border-t border-[#e8eae7] pt-3">
+        <p className="text-sm text-red-500 text-center border-t border-[#e8eae7] dark:border-[#332A24] pt-3">
           {msg}
         </p>
       )}
@@ -594,7 +631,7 @@ export default function ProfileView({
       {!hideSignOut && onSignOut && (
         <button
           onClick={onSignOut}
-          className="w-full mt-2 border border-[#e8eae7] bg-[#fafaf8] text-slate-500 rounded-lg py-2 text-sm hover:bg-[#f0eef0] hover:text-red-500 transition-colors duration-150"
+          className="w-full mt-2 border border-[#e8eae7] dark:border-[#382F28] bg-[#fafaf8] dark:bg-[#231E1B] text-slate-500 dark:text-red-400 rounded-lg py-2 text-sm hover:bg-[#f0eef0] dark:hover:bg-red-950/20 hover:text-red-500 transition-colors duration-150"
         >
           退出登录
         </button>

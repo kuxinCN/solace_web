@@ -15,8 +15,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** 限流：按用户 + 按 IP 各一层 */
-const USER_RATE_LIMIT = { limit: 20, windowMs: 60 * 1000 };
-const IP_RATE_LIMIT = { limit: 40, windowMs: 60 * 1000 };
+const USER_RATE_LIMIT = { limit: 120, windowMs: 60 * 1000 };
+const IP_RATE_LIMIT = { limit: 240, windowMs: 60 * 1000 };
 
 export async function POST(request) {
   const user = await getCurrentUser(request);
@@ -90,7 +90,8 @@ export async function POST(request) {
   //   ⚠️ 顺序也重要：**先定标签去留、再去掉非标签的括号内容** ——
   //      后者是"白名单之外一律删"，反过来的话连该留的语气标签一起删了。
   const tagWords = tagWordsFrom(ttsConfig);
-  const withoutTags = isStyleTagsEnabled(ttsConfig)
+  const isMimo = String(ttsConfig?.provider || "").toLowerCase().includes("mimo");
+  const withoutTags = isMimo && isStyleTagsEnabled(ttsConfig)
     ? text
     : stripTtsTags(text, tagWords);
   const withoutStageDirections = stripNonTagBrackets(withoutTags, tagWords);
@@ -98,7 +99,11 @@ export async function POST(request) {
   // 纯 emoji / 纯颜文字 / 纯标签（或整条都是动作描写）的内容净化后为空，直接返回，避免白调一次上游
   if (!speakText) return jsonError("要合成的文字不能为空（剥掉朗读标签后没有可念的内容）", 400);
 
-  const result = await requestSpeech({ text: speakText, voice });
+  const result = await requestSpeech({
+    text: speakText,
+    voice,
+    dialect: user.ttsDialect,
+  });
   if (!result.ok) return jsonError(result.error, 400);
 
   return new Response(result.buffer, {

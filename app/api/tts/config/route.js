@@ -20,11 +20,14 @@ export const dynamic = "force-dynamic";
 export async function GET() {
   try {
     const config = await getGroup("tts");
+    const p = String(config?.provider || "").toLowerCase();
+    const isDashScope = p.includes("dashscope") || p.includes("qwen");
     return json({
       ok: true,
       tts: {
         enabled: config?.enabled === true,
         provider: String(config?.provider || ""),
+        isDashScope,
         styleTags: config?.styleTags !== false,
         styleTagWords: String(config?.styleTagWords || DEFAULT_STYLE_WORDS),
         eventTagWords: String(config?.eventTagWords || DEFAULT_EVENT_WORDS),
